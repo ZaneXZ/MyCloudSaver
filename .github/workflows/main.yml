@@ -1,56 +1,27 @@
-name: Docker Image CI/CD
+name: Build and Push to Docker Hub
+
 on:
   push:
-    tags: ["v*.*.*"] # 支持标签触发（如 v1.0.0）
-  workflow_dispatch: # 添加手动触发
+    branches: [ "main" ]
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # 必须授权以推送镜像
-    env:
-      REPO_NAME: ${{ github.repository }}
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      IMAGE_NAME: cloudsaver
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: 设置小写镜像名称和版本
-        run: |
-          LOWER_NAME=$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]')
-          echo "LOWER_NAME=$LOWER_NAME" >> $GITHUB_ENV
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-      - name: 登录到 GitHub Container Registry
+      # 使用官方封装好的登录动作，比直接敲命令更稳
+      - name: Log in to Docker Hub
         uses: docker/login-action@v2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
 
-      - name: 登录到 Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: 设置 QEMU 支持多架构
-        uses: docker/setup-qemu-action@v2
-
-      - name: 设置 Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: 构建并推送 Docker 镜像
+      - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
           context: .
-          platforms: linux/amd64,linux/arm64 # 指定架构：x86_64 和 ARM64
           push: true
-          tags: |
-            ghcr.io/${{ env.LOWER_NAME }}:latest
-            ghcr.io/${{ env.LOWER_NAME }}:${{ env.VERSION }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+          # 确保这里的变量名和 Settings 里完全一致
+          tags: ${{ secrets.DOCKER_USERNAME }}/my-cloudsaver-app:latest
