@@ -24,4 +24,4 @@ jobs:
           context: .
           push: true
           # 确保这里的变量名和 Settings 里完全一致
-          tags: ${{ secrets.DOCKER_USERNAME }}/my-cloudsaver-app:latest
+          tags: ${{ secrets.DOCKER_USERNAME }}/my-cloudsaver-app:v1.0.1
