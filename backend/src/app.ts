@@ -1,3 +1,13 @@
+if (typeof File === 'undefined') {
+  global.File = class File extends Blob {
+    name: string;
+    lastModified: number = Date.now();
+    constructor(chunks: any[], name: string, opts?: any) {
+      super(chunks, opts);
+      this.name = name;
+    }
+  } as any;
+}
 // filepath: /d:/code/CloudDiskDown/backend/src/app.ts
 import "./types/express";
 import express from "express";
