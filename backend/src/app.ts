@@ -1,3 +1,8 @@
+// @ts-ignore
+/**
+ * Node.js v18 兼容性补丁
+ * 修复在某些 Node 18 环境下 undici 库报 "ReferenceError: File is not defined" 的问题
+ */
 if (typeof File === 'undefined') {
   global.File = class File extends Blob {
     name: string;
@@ -8,7 +13,7 @@ if (typeof File === 'undefined') {
     }
   } as any;
 }
-// filepath: /d:/code/CloudDiskDown/backend/src/app.ts
+
 import "./types/express";
 import express from "express";
 import { container } from "./inversify.config";
@@ -19,167 +24,230 @@ import routes from "./routes/api";
 import { logger } from "./utils/logger";
 import { errorHandler } from "./middleware/errorHandler";
 
-// === TG BOT 依赖导入 ===
+// === 业务依赖导入 ===
 import { Telegraf, Markup } from "telegraf";
 import { Searcher } from "./services/Searcher";
 import { Cloud115Service } from "./services/Cloud115Service";
 import UserSetting from "./models/UserSetting";
 
+/**
+ * 接口定义：用户会话状态
+ */
+interface UserSession {
+  results: any[];        // 存储最近一次搜索的前10条结果
+  targetFolderId: string; // 当前用户设定的转存目标目录 ID
+}
+
 class App {
   private app = express();
   private databaseService = container.get<DatabaseService>(TYPES.DatabaseService);
   
-  // 从容器中获取搜索和转存服务实例
+  // 从容器中获取单例服务
   private searcher = container.get<Searcher>(TYPES.Searcher);
   private cloud115Service = container.get<Cloud115Service>(TYPES.Cloud115Service);
 
+  // 内存存储：管理不同用户的交互状态
+  private userSessions = new Map<number, UserSession>();
+
   constructor() {
     this.setupExpress();
-    // 初始化机器人
     this.setupTelegramBot();
   }
 
+  /**
+   * 初始化 Express 基础配置
+   */
   private setupExpress(): void {
-    // 设置中间件
     setupMiddlewares(this.app);
-
-    // 设置路由
     this.app.use("/", routes);
     this.app.use(errorHandler);
   }
 
-  // === TG BOT 逻辑核心实现 ===
+  /**
+   * 获取用户会话，若不存在则初始化默认值
+   */
+  private getSession(userId: number): UserSession {
+    if (!this.userSessions.has(userId)) {
+      this.userSessions.set(userId, { results: [], targetFolderId: "0" });
+    }
+    return this.userSessions.get(userId)!;
+  }
+
+  /**
+   * Telegram 机器人核心逻辑实现
+   */
   private setupTelegramBot(): void {
     const token = process.env.TG_BOT_TOKEN;
-    // 默认管理员 ID，需确保数据库 UserSettings 表中有该 userId 的 115 Cookie
     const adminUserId = process.env.ADMIN_USER_ID || "1"; 
 
     if (!token) {
-      logger.warn("⚠️ 未找到 TG_BOT_TOKEN，Telegram 机器人未启动");
+      logger.warn("⚠️ 未找到 TG_BOT_TOKEN，机器人未启动");
       return;
     }
 
     const bot = new Telegraf(token);
 
-    // 1. 搜索指令：/search 关键词
+    // --- 命令 1: 设置转存目录 ---
+    bot.command("setfolder", async (ctx) => {
+      const folderId = ctx.payload.trim();
+      if (!folderId) return ctx.reply("💡 请输入文件夹ID。例：/setfolder 123456\n(0 代表根目录)");
+      
+      const session = this.getSession(ctx.from.id);
+      session.targetFolderId = folderId;
+      
+      ctx.reply(`✅ 路径已更新！\n📂 当前转存位置: ${folderId === "0" ? "根目录" : folderId}`);
+    });
+
+    // --- 命令 2: 查询当前配置 ---
+    bot.command("folder", async (ctx) => {
+      const folderId = this.getSession(ctx.from.id).targetFolderId;
+      ctx.reply(`📂 您当前的转存位置为: ${folderId === "0" ? "根目录 (0)" : folderId}\n\n💡 修改命令: /setfolder [ID]`);
+    });
+
+    // --- 命令 3: 搜索资源 ---
     bot.command("search", async (ctx) => {
       const keyword = ctx.payload;
-      if (!keyword) return ctx.reply("💡 使用方法：/search 关键词\n例如：/search 庆余年");
+      if (!keyword) return ctx.reply("💡 使用方法：/search 关键词");
 
-      const loadingMsg = await ctx.reply("🔍 正在全网搜索 115 资源，请稍候...");
+      const loadingMsg = await ctx.reply("🔍 正在爬取资源，请稍候...");
 
       try {
         const result = await this.searcher.searchAll(keyword);
-        
-        if (!result.data || result.data.length === 0) {
-          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到相关资源。");
+        const allItems = result.data?.flatMap(channel => channel.list) || [];
+
+        // 过滤出含有 115 链接的有效资源并截取前 10 条
+        const filteredItems = allItems
+          .filter(item => item.cloudLinks?.some((l: string) => l.includes("115.com/s/")))
+          .slice(0, 10);
+
+        if (filteredItems.length === 0) {
+          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到 115 资源，请尝试其他关键词。");
         }
 
-        // 扁平化处理所有频道的结果
-        const allItems = result.data.flatMap(channel => channel.list);
+        // 更新会话中的搜索结果
+        const session = this.getSession(ctx.from.id);
+        session.results = filteredItems;
+
+        let responseTxt = `🔍 <b>"${keyword}"</b> 的搜索结果:\n\n`;
+        filteredItems.forEach((item, index) => {
+          responseTxt += `${index + 1}. <b>${item.title}</b>\n   来源: ${item.channel}\n\n`;
+        });
         
-        // 仅发送前 8 条结果，避免触发 TG 频率限制
-        for (const item of allItems.slice(0, 8)) {
-          // 寻找 115 分享链接
-          const shareLink = item.cloudLinks?.find((l: string) => l.includes("115.com/s/"));
-          
-          if (shareLink) {
-            // 解析 shareCode 和 password
-            const url = new URL(shareLink);
-            const shareCode = url.pathname.split('/').pop() || "";
-            const receiveCode = url.searchParams.get("password") || "";
+        responseTxt += `📂 转存目录: <b>${session.targetFolderId === "0" ? "根目录" : session.targetFolderId}</b>\n`;
+        responseTxt += `💡 <i>发送对应数字 (1-10) 即可开始转存</i>`;
 
-            const caption = `<b>📂 资源:</b> ${item.title}\n` +
-                            `<b>📡 频道:</b> ${item.channel}\n` +
-                            `<b>🔗 类型:</b> ${item.cloudType || '115网盘'}`;
-
-            await ctx.reply(caption, {
-              parse_mode: 'HTML',
-              ...Markup.inlineKeyboard([
-                [Markup.button.callback("🚀 立即转存到 115", `save_${shareCode}_${receiveCode}`)]
-              ])
-            });
-          }
-        }
-
-        ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+        await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, responseTxt, { parse_mode: 'HTML' });
       } catch (err) {
-        logger.error("TG 搜索报错:", err);
-        ctx.reply("❌ 搜索过程中发生错误，请检查日志。");
+        logger.error("TG 搜索失败:", err);
+        ctx.reply("❌ 搜索服务暂时不可用。");
       }
     });
 
-    // 2. 处理转存动作
+    // --- 监听 4: 处理数字快捷转存 ---
+    bot.on("text", async (ctx, next) => {
+      const text = ctx.message.text.trim();
+      const session = this.getSession(ctx.from.id);
+
+      // 正则判断是否为 1-10 的纯数字
+      if (/^\d+$/.test(text)) {
+        const index = parseInt(text) - 1;
+        if (session.results.length > 0 && index >= 0 && index < session.results.length) {
+          const item = session.results[index];
+          return this.handleQuickTransfer(ctx, item, session.targetFolderId, adminUserId);
+        }
+      }
+      return next();
+    });
+
+    // --- 监听 5: 处理 Inline 按钮回调 (如果需要) ---
     bot.action(/^save_(.+?)_(.*)$/, async (ctx) => {
       const shareCode = ctx.match[1];
       const receiveCode = ctx.match[2];
-
-      try {
-        await ctx.answerCbQuery("正在获取文件信息...");
-
-        // 获取该管理员的 115 Cookie
-        const userSetting = await UserSetting.findOne({ where: { userId: adminUserId } });
-        const cookie = userSetting?.dataValues.cloud115Cookie;
-
-        if (!cookie) {
-          return ctx.reply("❌ 错误：请先在网页端登录 115 网盘并保存设置。");
-        }
-
-        // 注入 Cookie (利用私有变量注入，绕过请求对象限制)
-        (this.cloud115Service as any).cookie = cookie;
-
-        // 获取分享快照中的文件 ID
-        const shareInfo = await this.cloud115Service.getShareInfo(shareCode, receiveCode);
-        const firstFile = shareInfo.data.list[0];
-
-        if (!firstFile) throw new Error("分享内容为空或已失效");
-
-        // 执行保存
-        await this.cloud115Service.saveSharedFile({
-          shareCode,
-          receiveCode,
-          fids: [firstFile.fileId],
-          folderId: "0" // 默认转存到 115 根目录
-        });
-
-        await ctx.reply(`✅ 成功转存至 115！\n📦 文件名: ${firstFile.fileName}`);
-      } catch (err: any) {
-        logger.error("TG 转存失败:", err);
-        await ctx.reply(`❌ 转存失败: ${err.message}`);
-      }
+      const folderId = this.getSession(ctx.from!.id).targetFolderId;
+      await this.executeSaveAction(ctx, shareCode, receiveCode, folderId, adminUserId);
     });
 
-    bot.launch();
-    logger.info("🤖 Telegram Bot 模块已成功挂载并启动");
+    bot.launch().catch(err => logger.error("Bot Launch Error:", err));
+    logger.info("🤖 Telegram Bot 已挂载成功，等待消息...");
   }
 
+  /**
+   * 处理数字选中的快捷转存逻辑
+   */
+  private async handleQuickTransfer(ctx: any, item: any, folderId: string, adminUserId: string) {
+    const shareLink = item.cloudLinks.find((l: string) => l.includes("115.com/s/"));
+    if (!shareLink) return ctx.reply("❌ 该条目未检测到有效 115 链接");
+
+    try {
+      const url = new URL(shareLink);
+      const shareCode = url.pathname.split('/').pop() || "";
+      const receiveCode = url.searchParams.get("password") || "";
+
+      await ctx.reply(`🚀 正在发起转存: ${item.title.substring(0, 20)}...`);
+      await this.executeSaveAction(ctx, shareCode, receiveCode, folderId, adminUserId);
+    } catch (e) {
+      ctx.reply("❌ 解析分享链接失败");
+    }
+  }
+
+  /**
+   * 执行真正的 115 API 调用逻辑
+   */
+  private async executeSaveAction(ctx: any, shareCode: string, receiveCode: string, folderId: string, adminUserId: string) {
+    try {
+      // 获取存储在数据库中的 Cookie
+      const userSetting = await UserSetting.findOne({ where: { userId: adminUserId } });
+      const cookie = userSetting?.dataValues.cloud115Cookie;
+
+      if (!cookie) {
+        return ctx.reply("❌ 未检测到 115 Cookie，请先在网页端登录保存。");
+      }
+
+      // 临时注入 Cookie 执行 API
+      (this.cloud115Service as any).cookie = cookie;
+
+      // 获取分享详情获取 fid
+      const shareInfo = await this.cloud115Service.getShareInfo(shareCode, receiveCode);
+      const firstFile = shareInfo.data.list[0];
+
+      if (!firstFile) throw new Error("分享链接已失效或文件夹为空");
+
+      // 执行保存接口
+      const saveResult = await this.cloud115Service.saveSharedFile({
+        shareCode,
+        receiveCode,
+        fids: [firstFile.fileId],
+        folderId: folderId
+      });
+
+      await ctx.reply(`✅ 转存成功！\n📦 文件: ${firstFile.fileName}\n📂 目录: ${folderId === "0" ? "根目录" : folderId}`);
+    } catch (err: any) {
+      logger.error("转存执行失败:", err);
+      await ctx.reply(`❌ 转存失败: ${err.message || "未知错误"}`);
+    }
+  }
+
+  /**
+   * 应用启动入口
+   */
   public async start(): Promise<void> {
     try {
-      // 初始化数据库
       await this.databaseService.initialize();
       logger.info("数据库初始化成功");
 
-      // 启动服务器
       const port = process.env.PORT || 8009;
       this.app.listen(port, () => {
-        logger.info(`
-🚀 服务器启动成功
-🌍 监听端口: ${port}
-🔧 运行环境: ${process.env.NODE_ENV || "development"}
-        `);
+        logger.info(`🚀 服务器运行在端口: ${port} [${process.env.NODE_ENV || 'dev'}]`);
       });
     } catch (error) {
-      logger.error("服务器启动失败:", error);
+      logger.error("启动失败:", error);
       process.exit(1);
     }
   }
 }
 
-// 创建并启动应用
+// 实例化并运行
 const application = new App();
-application.start().catch((error) => {
-  logger.error("应用程序启动失败:", error);
-  process.exit(1);
-});
+application.start();
 
 export default application;
