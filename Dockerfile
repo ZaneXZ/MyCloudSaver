@@ -8,7 +8,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # 构建后端项目
-FROM node:18-alpine as backend-build
+FROM node:20-alpine as backend-build
 WORKDIR /app
 COPY backend/package*.json ./
 RUN npm install -g pnpm
