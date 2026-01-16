@@ -1,6 +1,7 @@
 export interface ShareInfoResponse {
   data: {
     list: ShareInfoItem[];
+    share_title?: string; // <-- 1. 新增：存储 115 分享页面的标题
     fileSize?: number;
     pwdId?: string;
     stoken?: string;
@@ -18,6 +19,7 @@ export interface ShareInfoItem {
   fileSize?: number;
   fileIdToken?: string;
 }
+
 export interface FolderListResponse {
   data: {
     cid: string;
@@ -68,6 +70,7 @@ export interface QuarkShareInfo {
   stoken?: string;
   pwdId?: string;
   fileSize?: number;
+  share_title?: string; // <-- 2. 建议同步给 Quark 接口也加上，保持结构一致
   list: {
     fid: string;
     file_name: string;
