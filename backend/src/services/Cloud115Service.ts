@@ -28,7 +28,7 @@ export class Cloud115Service implements ICloudStorageService {
   }
 
   /**
-   * 将文件夹 CID 转换为人类可读名称
+   * 优化：根据 CID 获取完整路径名 (例如: 根目录 > 电影 > 追剧)
    */
   async getFolderNameById(cid: string): Promise<string> {
     if (!cid || cid === "0") return "根目录";
@@ -36,6 +36,11 @@ export class Cloud115Service implements ICloudStorageService {
       const response = await this.api.get("https://webapi.115.com/files/getid", {
         params: { cid: cid }
       });
+      // 115 接口通常在 getid 结果中返回路径数组
+      const paths = response.data?.data || [];
+      if (paths.length > 0) {
+        return paths.map((p: any) => p.name).join(" > ");
+      }
       return response.data?.name || `目录(${cid})`;
     } catch (error) {
       logger.error(`[115Service] 获取目录名失败: ${cid}`);
@@ -43,20 +48,34 @@ export class Cloud115Service implements ICloudStorageService {
     }
   }
 
-  async getCidByPath(path: string): Promise<string> {
-    const folders = path.split('/').filter(p => p.trim() !== "");
+  /**
+   * 核心：解析路径并自动创建缺失的文件夹
+   */
+  async resolvePathToId(path: string): Promise<string> {
+    const folders = path.split(/[\/\\]/).filter(p => p.trim() !== "");
     let currentCid = "0";
 
     for (const folderName of folders) {
       const response = await this.api.get("/files", {
         params: { cid: currentCid, show_dir: 1, limit: 1000, format: "json" }
       });
+      
       const list = response.data?.data || [];
-      const target = list.find((item: any) => item.n === folderName && !item.fid); 
+      // 在当前目录下找同名文件夹
+      const target = list.find((item: any) => item.n === folderName);
+
       if (target) {
         currentCid = target.cid;
       } else {
-        throw new Error(`未找到文件夹: "${folderName}"`);
+        // 不存在则创建
+        const createParams = new URLSearchParams({ pid: currentCid, name: folderName });
+        const createRes = await this.api.post("/files/add", createParams.toString());
+        
+        if (createRes.data && createRes.data.state) {
+          currentCid = createRes.data.cid;
+        } else {
+          throw new Error(`创建文件夹 "${folderName}" 失败: ${createRes.data?.error || '未知错误'}`);
+        }
       }
     }
     return currentCid;
@@ -76,7 +95,7 @@ export class Cloud115Service implements ICloudStorageService {
           list: (resData.data.list || []).map((item: any) => ({
             fileId: item.fid || item.cid,
             fileName: item.n || item.fn,
-            fileSize: Number(item.s || item.fz || 0), // 确保是数字
+            fileSize: Number(item.s || item.fz || 0),
           })),
         },
       };
