@@ -31,7 +31,6 @@ class App {
   private searcher = container.get<Searcher>(TYPES.Searcher);
   private cloud115Service = container.get<Cloud115Service>(TYPES.Cloud115Service);
 
-  // 仅存储用户的目标文件夹配置
   private userFolders = new Map<number, string>();
 
   constructor() {
@@ -56,98 +55,112 @@ class App {
 
     const bot = new Telegraf(token);
 
-    // 注册快捷指令菜单
+    // 设置指令菜单
     bot.telegram.setMyCommands([
-      { command: 'search', description: '🔍 搜索 115 资源' },
-      { command: 'folder', description: '📂 查看当前转存目录' },
-      { command: 'setfolder', description: '✍️ 修改转存目录 ID' }
+      { command: 'search', description: '🔍 全网搜索 (支持 115 一键转存)' },
+      { command: 'folder', description: '📂 查看当前 115 转存目录' },
+      { command: 'setfolder', description: '✍️ 修改 115 转存目录 ID' }
     ]);
 
-    // --- 命令: 设置目录 ---
     bot.command("setfolder", async (ctx) => {
       const folderId = ctx.payload.trim();
-      if (!folderId) return ctx.reply("💡 请输入文件夹ID。例：/setfolder 123456");
+      if (!folderId) return ctx.reply("💡 请输入文件夹 ID (例: /setfolder 0)");
       this.userFolders.set(ctx.from.id, folderId);
-      ctx.reply(`✅ 路径已更新为: ${folderId === "0" ? "根目录" : folderId}`);
+      ctx.reply(`✅ 115 转存路径已设置为: ${folderId === "0" ? "根目录" : folderId}`);
     });
 
-    // --- 命令: 查询目录 ---
     bot.command("folder", async (ctx) => {
       const folderId = this.userFolders.get(ctx.from.id) || "0";
-      ctx.reply(`📂 当前转存位置: ${folderId === "0" ? "根目录" : folderId}`);
+      ctx.reply(`📂 当前 115 转存目录 ID: ${folderId}`);
     });
 
-    // --- 命令: 搜索资源 ---
     bot.command("search", async (ctx) => {
       const keyword = ctx.payload;
-      if (!keyword) return ctx.reply("💡 使用方法：/search 关键词");
+      if (!keyword) return ctx.reply("💡 请输入关键词，例如：/search 庆余年");
 
-      const loadingMsg = await ctx.reply("🔍 正在搜索，请稍候...");
+      const loadingMsg = await ctx.reply(`🔍 正在检索 "${keyword}"...`);
 
       try {
         const result = await this.searcher.searchAll(keyword);
         const allItems = result.data?.flatMap(channel => channel.list) || [];
-        const filteredItems = allItems
-          .filter(item => item.cloudLinks?.some((l: string) => l.includes("115.com/s/")))
-          .slice(0, 10);
+        const topItems = allItems.slice(0, 10);
 
-        if (filteredItems.length === 0) {
-          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到 115 资源。");
+        if (topItems.length === 0) {
+          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到资源。");
         }
 
         const currentFolder = this.userFolders.get(ctx.from.id) || "0";
         let responseTxt = `🔍 <b>"${keyword}"</b> 搜索结果:\n\n`;
         
-        // 构建按钮网格 (每行5个)
-        const buttons = filteredItems.map((item, index) => {
-          responseTxt += `${index + 1}. <b>${item.title}</b>\n`;
+        const keyboard: any[][] = [];
+        let currentRow: any[] = [];
+
+        topItems.forEach((item, index) => {
+          // 兼容性识别 115 及其所有变体域名
+          const shareLink115 = item.cloudLinks?.find((l: string) => 
+            /https?:\/\/(?:115|anxia|115cdn|115\.me)\.com?\/s\//i.test(l)
+          );
           
-          const shareLink = item.cloudLinks.find((l: string) => l.includes("115cdn.com/s/"));
-          const url = new URL(shareLink);
-          const sc = url.pathname.split('/').pop() || "";
-          const pc = url.searchParams.get("password") || "";
+          const typeIcon = shareLink115 ? "🔵" : "⚪";
+          responseTxt += `${index + 1}. ${typeIcon} <b>${item.title}</b>\n   来源: ${item.channel} | ${item.cloudType || '网盘'}\n\n`;
           
-          // 回调数据格式: save|shareCode|password|index
-          return Markup.button.callback(`${index + 1}`, `sv|${sc}|${pc}|${index + 1}`);
+          if (shareLink115) {
+            try {
+              const url = new URL(shareLink115);
+              // 精准提取 shareCode：过滤掉路径中的 's'
+              const sc = url.pathname.split('/').filter(p => p && p !== 's').pop() || "";
+              const pc = url.searchParams.get("password") || "";
+              
+              if (sc) {
+                currentRow.push(Markup.button.callback(`${index + 1} (存)`, `sv|${sc}|${pc}|${index + 1}`));
+              } else {
+                currentRow.push(Markup.button.url(`${index + 1} (看)`, shareLink115));
+              }
+            } catch (e) {
+              currentRow.push(Markup.button.url(`${index + 1} (看)`, shareLink115));
+            }
+          } else if (item.cloudLinks?.[0]) {
+            currentRow.push(Markup.button.url(`${index + 1} (看)`, item.cloudLinks[0]));
+          }
+
+          if (currentRow.length === 5 || index === topItems.length - 1) {
+            keyboard.push(currentRow);
+            currentRow = [];
+          }
         });
 
-        const keyboard = [];
-        for (let i = 0; i < buttons.length; i += 5) {
-          keyboard.push(buttons.slice(i, i + 5));
-        }
-
-        responseTxt += `\n📂 目标目录: <b>${currentFolder === "0" ? "根目录" : currentFolder}</b>\n`;
-        responseTxt += `💡 <i>点击下方对应数字按钮直接转存</i>`;
+        responseTxt += `📂 转存至: <b>${currentFolder === "0" ? "根目录" : currentFolder}</b>\n`;
+        responseTxt += `💡 🔵 为 115 资源(点序号一键转存)\n   ⚪ 为其他资源(点序号跳转浏览器)`;
 
         await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, responseTxt, {
           parse_mode: 'HTML',
           ...Markup.inlineKeyboard(keyboard)
         });
       } catch (err) {
-        logger.error("搜索失败:", err);
-        ctx.reply("❌ 搜索出错。");
+        logger.error("搜索报错:", err);
+        ctx.reply("❌ 搜索失败。");
       }
     });
 
-    // --- 处理内联按钮点击 ---
+    // 按钮回调处理
     bot.action(/^sv\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
       const [, sc, pc, idx] = ctx.match;
       const folderId = this.userFolders.get(ctx.from!.id) || "0";
 
       try {
-        // 在顶部弹出小气泡提示
-        await ctx.answerCbQuery(`正在转存第 ${idx} 个资源...`);
-
+        await ctx.answerCbQuery(`🚀 正在转存第 ${idx} 个...`);
         const userSetting = await UserSetting.findOne({ where: { userId: adminUserId } });
         const cookie = userSetting?.dataValues.cloud115Cookie;
 
-        if (!cookie) return ctx.reply("❌ 请先在网页端登录 115");
+        if (!cookie) return ctx.reply("❌ 错误：请先在网页端登录并保存 115 设置。");
 
         (this.cloud115Service as any).cookie = cookie;
+        
+        // 注意：API 请求不关心域名，只要提取出的 sc (shareCode) 是正确的
         const shareInfo = await this.cloud115Service.getShareInfo(sc, pc);
         const firstFile = shareInfo.data.list[0];
 
-        if (!firstFile) throw new Error("链接失效");
+        if (!firstFile) throw new Error("资源已失效");
 
         await this.cloud115Service.saveSharedFile({
           shareCode: sc,
@@ -156,21 +169,21 @@ class App {
           folderId: folderId
         });
 
-        await ctx.reply(`✅ 第 ${idx} 个转存成功！\n📦 ${firstFile.fileName}`);
+        await ctx.reply(`✅ 转存成功！\n📦 ${firstFile.fileName}\n📂 目录ID: ${folderId}`);
       } catch (err: any) {
         await ctx.reply(`❌ 第 ${idx} 个转存失败: ${err.message}`);
       }
     });
 
     bot.launch();
-    logger.info("🤖 机器人已启动 (内联按钮模式)");
+    logger.info("🤖 115 助手机器人已启动");
   }
 
   public async start(): Promise<void> {
     try {
       await this.databaseService.initialize();
       const port = process.env.PORT || 8009;
-      this.app.listen(port, () => logger.info(`🚀 Server on ${port}`));
+      this.app.listen(port, () => logger.info(`🚀 Server listening on ${port}`));
     } catch (error) {
       process.exit(1);
     }
