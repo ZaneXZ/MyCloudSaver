@@ -1,7 +1,54 @@
-// ... (补丁部分保持不变)
+// @ts-ignore
+if (typeof File === 'undefined') {
+  global.File = class File extends Blob {
+    name: string;
+    lastModified: number = Date.now();
+    constructor(chunks: any[], name: string, opts?: any) {
+      super(chunks, opts);
+      this.name = name;
+    }
+  } as any;
+}
+
+import "./types/express";
+import express from "express";
+import { container } from "./inversify.config";
+import { TYPES } from "./core/types";
+import { DatabaseService } from "./services/DatabaseService";
+import { setupMiddlewares } from "./middleware";
+import routes from "./routes/api";
+import { logger } from "./utils/logger";
+import { errorHandler } from "./middleware/errorHandler";
+import axios from "axios";
+
+import { Telegraf, Markup } from "telegraf";
+import { Searcher } from "./services/Searcher";
+import { Cloud115Service } from "./services/Cloud115Service";
+import UserSetting from "./models/UserSetting";
 
 class App {
-  // ... (属性定义保持不变)
+  private app = express();
+  private databaseService = container.get<DatabaseService>(TYPES.DatabaseService);
+  private searcher = container.get<Searcher>(TYPES.Searcher);
+  private cloud115Service = container.get<Cloud115Service>(TYPES.Cloud115Service);
+
+  private userFolders = new Map<number, string>();
+
+  constructor() {
+    this.setupExpress();
+    this.setupTelegramBot();
+  }
+
+  private setupExpress(): void {
+    setupMiddlewares(this.app);
+    this.app.use("/", routes);
+    this.app.use(errorHandler);
+  }
+
+  private async get115Cookie(adminUserId: string): Promise<string | null> {
+    const userSetting = await UserSetting.findOne({ where: { userId: adminUserId } });
+    return userSetting?.dataValues.cloud115Cookie || null;
+  }
 
   private async getFolderName(folderId: string, cookie: string): Promise<string> {
     if (folderId === "0" || !folderId) return "根目录";
@@ -9,7 +56,7 @@ class App {
       const resp = await axios.get(`https://webapi.115.com/files/getid?cid=${folderId}`, {
         headers: { 
           'Cookie': cookie,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/115.0.0.0 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
           'Referer': 'https://115.com/'
         }
       });
@@ -19,7 +66,36 @@ class App {
     }
   }
 
-  // ... (resolvePathToId 保持不变，用于 setfolder 兼容)
+  // --- 核心增强：路径解析函数（仅查询） ---
+  private async resolvePathToId(pathStr: string, cookie: string): Promise<string> {
+    const folders = pathStr.split('/')
+        .map(p => p.trim())
+        .filter(p => p !== "" && p !== "根目录" && p !== "首页");
+        
+    let currentId = "0"; 
+
+    for (const folderName of folders) {
+      const listUrl = `https://webapi.115.com/files?aid=1&cid=${currentId}&o=user_ptime&asc=0&offset=0&limit=1000&format=json`;
+      const listResp = await axios.get(listUrl, { 
+        headers: { 
+            'Cookie': cookie,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://115.com/'
+        } 
+      });
+      
+      const fileList = listResp.data?.data || listResp.data?.list || [];
+      // 在当前层级寻找同名的文件夹
+      const target = fileList.find((f: any) => f.n === folderName && (f.fid === undefined || f.p === undefined));
+
+      if (target) {
+        currentId = target.cid;
+      } else {
+        throw new Error(`找不到文件夹: "${folderName}"。请确保你在 115 中已经手动创建了该路径。`);
+      }
+    }
+    return currentId;
+  }
 
   private setupTelegramBot(): void {
     const token = process.env.TG_BOT_TOKEN;
@@ -28,45 +104,69 @@ class App {
     if (!token) return;
     const bot = new Telegraf(token);
 
-    // --- 指令设置 ---
     bot.telegram.setMyCommands([
       { command: 'search', description: '🔍 搜索资源' },
       { command: 'folder', description: '📂 查看当前目录' },
-      { command: 'setfolder', description: '✍️ 设置转存路径' }
+      { command: 'setfolder', description: '✍️ 设置路径或ID' }
     ]);
 
-    // ... (setfolder 和 folder 命令保持不变)
+    bot.command("setfolder", async (ctx) => {
+      const input = ctx.payload.trim();
+      if (!input) return ctx.reply("💡 请输入文件夹 ID 或 路径。\n例1: /setfolder 123456\n例2: /setfolder /我的视频/电影");
 
-    // --- 核心修改：搜索资源并回显路径 ---
-    bot.command("search", async (ctx) => {
-      const keyword = ctx.payload;
-      if (!keyword) return ctx.reply("💡 请输入关键词，例如：/search 庆余年");
-
-      const loadingMsg = await ctx.reply(`🔍 正在全网检索 "${keyword}"...`);
       const cookie = await this.get115Cookie(adminUserId);
-      
-      // 实时获取当前用户设定的 ID
-      const folderId = this.userFolders.get(ctx.from.id) || "0";
-      // 实时查询该 ID 对应的文件夹名称
-      const folderName = cookie ? await this.getFolderName(folderId, cookie) : "未登录";
+      if (!cookie) return ctx.reply("❌ 请先在网页端登录 115");
 
       try {
-        const result = await this.searcher.searchAll(keyword);
-        const allItems = result.data?.flatMap(channel => channel.list) || [];
-        const topItems = allItems.slice(0, 10);
-
-        if (topItems.length === 0) {
-          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到资源。");
+        let folderId = "";
+        if (/^\d+$/.test(input)) {
+          // 如果是纯数字，直接作为 ID
+          folderId = input;
+        } else {
+          // 如果是路径，递归查找
+          const waitMsg = await ctx.reply("⌛ 正在查询 115 目录...");
+          folderId = await this.resolvePathToId(input, cookie);
+          await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id);
         }
 
-        let responseTxt = `🔍 <b>"${keyword}"</b> 搜索结果:\n\n`;
+        const realName = await this.getFolderName(folderId, cookie);
+        this.userFolders.set(ctx.from.id, folderId);
+        ctx.reply(`✅ 设置成功！\n📂 目标：<b>${realName}</b>\n🆔 ID：<code>${folderId}</code>`, { parse_mode: 'HTML' });
+      } catch (e: any) {
+        ctx.reply(`❌ 设置失败: ${e.message}`);
+      }
+    });
+
+    bot.command("folder", async (ctx) => {
+      const cookie = await this.get115Cookie(adminUserId);
+      const folderId = this.userFolders.get(ctx.from.id) || "0";
+      const name = cookie ? await this.getFolderName(folderId, cookie) : folderId;
+      ctx.reply(`📂 当前目录: <b>${name}</b>\n🆔 ID: <code>${folderId}</code>`, { parse_mode: 'HTML' });
+    });
+
+    bot.command("search", async (ctx) => {
+      const keyword = ctx.payload;
+      if (!keyword) return ctx.reply("💡 请输入关键词");
+      const loadingMsg = await ctx.reply(`🔍 搜索 "${keyword}"...`);
+      
+      try {
+        const cookie = await this.get115Cookie(adminUserId);
+        const folderId = this.userFolders.get(ctx.from.id) || "0";
+        const folderName = cookie ? await this.getFolderName(folderId, cookie) : "根目录";
+
+        const result = await this.searcher.searchAll(keyword);
+        const allItems = (result.data || []).flatMap((c: any) => c.list || []);
+        const topItems = allItems.slice(0, 10);
+
+        if (topItems.length === 0) return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到资源。");
+
+        let responseTxt = `🔍 <b>"${keyword}"</b> 结果:\n\n`;
         const keyboard: any[][] = [];
         let currentRow: any[] = [];
 
-        topItems.forEach((item, index) => {
+        topItems.forEach((item: any, index: number) => {
           const shareLink115 = item.cloudLinks?.find((l: string) => /https?:\/\/(?:115|anxia|115cdn|115\.me)\.com?\/s\//i.test(l));
-          const typeIcon = shareLink115 ? "🔵" : "⚪";
-          responseTxt += `${index + 1}. ${typeIcon} <b>${item.title}</b>\n   来源: ${item.channel}\n\n`;
+          responseTxt += `${index + 1}. ${shareLink115 ? "🔵" : "⚪"} <b>${item.title}</b>\n   来源: ${item.channel}\n\n`;
           
           if (shareLink115) {
             const url = new URL(shareLink115);
@@ -83,30 +183,47 @@ class App {
           }
         });
 
-        // --- 实时回显部分 ---
-        responseTxt += `--- --- --- --- ---\n`;
-        responseTxt += `📂 当前转存至: <b>${folderName}</b>\n`;
-        responseTxt += `🆔 目录ID: <code>${folderId}</code>\n`;
-        responseTxt += `💡 <i>点击 (存) 按钮将直接保存至上方路径</i>`;
-
+        responseTxt += `--- --- --- --- ---\n📂 转存至: <b>${folderName}</b>\n🆔 目录ID: <code>${folderId}</code>`;
         await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, responseTxt, {
           parse_mode: 'HTML',
           ...Markup.inlineKeyboard(keyboard)
         });
       } catch (err) {
-        logger.error("搜索失败:", err);
-        ctx.reply("❌ 搜索出错，请稍后重试");
+        ctx.reply("❌ 搜索失败");
       }
     });
 
-    // ... (action 回调逻辑保持不变)
+    bot.action(/^sv\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
+      const [, sc, pc] = ctx.match;
+      const folderId = this.userFolders.get(ctx.from!.id) || "0";
+      try {
+        await ctx.answerCbQuery(`🚀 转存中...`);
+        const cookie = await this.get115Cookie(adminUserId);
+        if (!cookie) return ctx.reply("❌ 请登录");
+        (this.cloud115Service as any).cookie = cookie;
+        const shareInfo = await this.cloud115Service.getShareInfo(sc, pc);
+        const firstFile = shareInfo.data.list[0];
+        if (!firstFile) throw new Error("资源已过期");
+        await this.cloud115Service.saveSharedFile({
+          shareCode: sc, receiveCode: pc, fids: [firstFile.fileId], folderId: folderId
+        });
+        await ctx.reply(`✅ 转存成功！\n📦 ${firstFile.fileName}`);
+      } catch (err: any) {
+        await ctx.reply(`❌ 失败: ${err.message}`);
+      }
+    });
 
     bot.launch();
-    logger.info("🤖 机器人搜索增强版启动成功");
   }
 
   public async start(): Promise<void> {
-    // ...
+    try {
+      await this.databaseService.initialize();
+      const port = process.env.PORT || 8009;
+      this.app.listen(port, () => logger.info(`🚀 Server on ${port}`));
+    } catch (error) {
+      process.exit(1);
+    }
   }
 }
 
