@@ -29,19 +29,8 @@ export class Cloud115Service implements ICloudStorageService {
       "https://webapi.115.com",
       AxiosHeaders.from({
         Host: "webapi.115.com",
-        Connection: "keep-alive",
-        xweb_xhr: "1",
-        Origin: "",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 MicroMessenger/6.8.0(0x16080000) NetType/WIFI MiniProgramEnv/Mac MacWechat/WMPF MacWechat/3.8.9(0x13080910) XWEB/1227",
-        Accept: "*/*",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        Referer: "https://servicewechat.com/wx2c744c010a61b0fa/94/page-frame.html",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "zh-CN,zh;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+        Referer: "https://115.com/",
       })
     );
 
@@ -53,29 +42,44 @@ export class Cloud115Service implements ICloudStorageService {
 
   async setCookie(req: Request): Promise<void> {
     const userId = req.user?.userId;
-    const userSetting = await UserSetting.findOne({
-      where: { userId },
-    });
+    const userSetting = await UserSetting.findOne({ where: { userId } });
     if (userSetting && userSetting.dataValues.cloud115Cookie) {
       this.cookie = userSetting.dataValues.cloud115Cookie;
     } else {
-      throw new Error("请先设置115网盘cookie");
+      throw new Error("未找到115 Cookie");
     }
   }
 
   /**
-   * 获取分享信息
+   * 获取分享信息（增强调试版）
    */
   async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
+    logger.info(`🔍 [115请求] 正在获取分享详情: ${shareCode} / 码: ${receiveCode}`);
+    
     const response = await this.api.get("/share/snap", {
       params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 20, cid: "" },
     });
 
     const resData = response.data;
+
+    // --- 【调试日志开始】 ---
+    // 这行会在控制台打印出 115 返回的原始结构，你可以看到标题到底在哪
+    console.log("----------------- 115 接口原始响应 -----------------");
+    console.log(JSON.stringify(resData, null, 2));
+    console.log("---------------------------------------------------");
+    // --- 【调试日志结束】 ---
+
     if (resData?.state && resData.data) {
-      // 提取分享标题，增加多层级兼容
-      const title = resData.data.share_title || resData.data.title || "未命名资源";
+      // 深度提取标题：115 不同接口版本可能叫 title, share_title 或在 snap_info 里
+      const title = 
+        resData.data.share_title || 
+        resData.data.title || 
+        resData.data.snap_info?.title ||
+        (resData.data.list && resData.data.list[0]?.n) || 
+        "未知资源名称";
       
+      logger.info(`✨ [115解析] 成功提取标题: ${title}`);
+
       return {
         data: {
           share_title: title,
@@ -87,38 +91,19 @@ export class Cloud115Service implements ICloudStorageService {
         },
       };
     } else {
-      logger.error("获取分享信息失败:", resData);
-      throw new Error(resData?.error || "获取分享信息失败");
+      logger.error("❌ [115错误] 响应状态异常:", resData);
+      throw new Error(resData?.error || "115 接口授权失败或链接失效");
     }
   }
 
-  /**
-   * 获取目录列表
-   */
   async getFolderList(parentCid = "0"): Promise<FolderListResponse> {
     const response = await this.api.get("/files", {
-      params: {
-        aid: 1,
-        cid: parentCid,
-        o: "user_ptime",
-        asc: 1,
-        offset: 0,
-        show_dir: 1,
-        limit: 50,
-        type: 0,
-        format: "json",
-        star: 0,
-        suffix: "",
-        natsort: 0,
-        snap: 0,
-        record_open_time: 1,
-        fc_mix: 0,
-      },
+      params: { aid: 1, cid: parentCid, o: "user_ptime", asc: 1, offset: 0, show_dir: 1, limit: 50, format: "json" },
     });
     if (response.data?.state) {
       return {
         data: response.data.data
-          .filter((item: Cloud115FolderItem) => item.cid && !!item.ns)
+          .filter((item: Cloud115FolderItem) => item.cid)
           .map((folder: Cloud115FolderItem) => ({
             cid: folder.cid,
             name: folder.n,
@@ -126,16 +111,11 @@ export class Cloud115Service implements ICloudStorageService {
           })),
       };
     } else {
-      logger.error("获取目录列表失败:", response.data.error);
-      throw new Error("获取115pan目录列表失败:" + response.data.error);
+      throw new Error("获取目录失败");
     }
   }
 
-  /**
-   * 保存分享文件
-   */
   async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
-    // 115 批量保存通常支持 fid 逗号分隔，这里根据你的 fids 数组处理
     const param = new URLSearchParams({
       cid: params.folderId || "0",
       share_code: params.shareCode || "",
@@ -144,16 +124,15 @@ export class Cloud115Service implements ICloudStorageService {
     });
 
     const response = await this.api.post("/share/receive", param.toString());
-    logger.info("保存文件响应:", response.data);
-
+    
     if (response.data.state) {
       return {
-        message: response.data.error || "保存成功",
+        message: response.data.error || "转存成功",
         data: response.data.data,
       };
     } else {
-      logger.error("保存文件失败:", response.data.error);
-      throw new Error("保存115pan文件失败:" + response.data.error);
+      logger.error("❌ [115转存失败]:", response.data.error);
+      throw new Error(response.data.error || "转存请求被115拒绝");
     }
   }
 }
