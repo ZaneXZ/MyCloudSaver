@@ -46,7 +46,6 @@ class App {
     this.app.use(errorHandler);
   }
 
-  // --- 从数据库获取用户配置 ---
   private async getUserConfig(adminUserId: string) {
     const setting = await UserSetting.findOne({ where: { userId: adminUserId } });
     return {
@@ -71,11 +70,9 @@ class App {
   private setupAutoMonitor() {
     const TWELVE_HOURS = 12 * 60 * 60 * 1000;
     setInterval(async () => {
-      logger.info("🔄 [定时任务] 开始扫描数据库中的追更任务...");
       const adminUserId = process.env.ADMIN_USER_ID || "";
       const { cookie } = await this.getUserConfig(adminUserId);
       if (!cookie) return;
-
       const tasks = await MonitorTask.findAll();
       for (const task of tasks) {
         try {
@@ -84,25 +81,17 @@ class App {
           const currentFiles = shareInfo.data.list || [];
           const processedFids = new Set<string>(JSON.parse(task.processedFids));
           const newFiles = currentFiles.filter((f: any) => !processedFids.has(f.fileId));
-
           if (newFiles.length > 0) {
-            const newFids = newFiles.map((f: any) => f.fileId);
             await this.cloud115Service.saveSharedFile({
               shareCode: task.shareCode, receiveCode: task.receiveCode,
-              fids: newFids, folderId: task.folderId
+              fids: newFiles.map((f: any) => f.fileId), folderId: task.folderId
             });
             newFiles.forEach((f: any) => processedFids.add(f.fileId));
             task.processedFids = JSON.stringify(Array.from(processedFids));
             await task.save();
-
-            await this.bot.telegram.sendMessage(task.chatId, 
-              `🔔 <b>追更通知</b>\n📦 资源：${task.title}\n✨ 检测到 ${newFiles.length} 个新文件已自动存入。`,
-              { parse_mode: 'HTML' }
-            );
+            await this.bot.telegram.sendMessage(task.chatId, `🔔 <b>追更通知</b>\n📦 ${task.title}\n✨ 检测到 ${newFiles.length} 个新文件。`, { parse_mode: 'HTML' });
           }
-        } catch (err: any) {
-          logger.error(`[追更异常] ${task.title}: ${err.message}`);
-        }
+        } catch (err: any) { logger.error(`[追更异常] ${task.title}: ${err.message}`); }
       }
     }, TWELVE_HOURS);
   }
@@ -122,9 +111,8 @@ class App {
 
     this.bot.command("folder", async (ctx) => {
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
-      if (!cookie) return ctx.reply("❌ 请先配置 115 Cookie");
-      const folderName = await this.getFolderName(folderId, cookie);
-      ctx.reply(`📂 <b>当前转存目录：</b>\n\n名称：${folderName}\nID：<code>${folderId}</code>`, { parse_mode: 'HTML' });
+      const folderName = await this.getFolderName(folderId, cookie || "");
+      ctx.reply(`📂 <b>当前转存目录：</b>\n名称：${folderName}\nID：<code>${folderId}</code>`, { parse_mode: 'HTML' });
     });
 
     this.bot.command("setfolder", async (ctx) => {
@@ -132,15 +120,12 @@ class App {
       if (!folderId) return ctx.reply("💡 请输入 ID：/setfolder 12345");
       const [setting] = await UserSetting.findOrCreate({ where: { userId: adminUserId } });
       await setting.update({ folderId });
-      const { cookie } = await this.getUserConfig(adminUserId);
-      const folderName = cookie ? await this.getFolderName(folderId, cookie) : "设置成功";
-      ctx.reply(`✅ <b>目录已保存</b>\n\n新目录：${folderName}`, { parse_mode: 'HTML' });
+      ctx.reply(`✅ 目录已保存：<code>${folderId}</code>`, { parse_mode: 'HTML' });
     });
 
     this.bot.command("tasks", async (ctx) => {
       const tasks = await MonitorTask.findAll();
       if (tasks.length === 0) return ctx.reply("📋 目前没有任务。");
-      await ctx.reply("📋 <b>追更列表：</b>", { parse_mode: 'HTML' });
       for (const t of tasks) {
         await ctx.reply(`📦 <b>${t.title}</b>`, {
           parse_mode: 'HTML',
@@ -149,82 +134,66 @@ class App {
       }
     });
 
-    // --- 修改后的搜索逻辑：支持多行独立按钮 ---
-   // --- 增强版搜索逻辑：显示来源频道 + 多行独立按钮 ---
+    // --- 核心修复：搜索与按钮生成 ---
     this.bot.command("search", async (ctx) => {
       const keyword = ctx.payload;
       if (!keyword) return ctx.reply("💡 请输入关键词");
       const loadingMsg = await ctx.reply(`🔍 正在搜索 "${keyword}"...`);
-      
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
-      const folderName = cookie ? await this.getFolderName(folderId, cookie) : "根目录";
 
       try {
         const result = await this.searcher.searchAll(keyword);
         
-        // 修改点：在扁平化列表时，尝试把频道名称注入到每一个 item 中
+        // 修复1: 增加对 .name 字段的读取，解决“未知频道”问题
         const allItems = (result.data || []).flatMap((sourceGroup: any) => {
-          const sourceName = sourceGroup.title || sourceGroup.source || "未知频道";
-          return (sourceGroup.list || []).map((item: any) => ({
-            ...item,
-            sourceName // 将频道名称注入到 item 对象中
-          }));
+          const sourceName = sourceGroup.title || sourceGroup.name || sourceGroup.source || "未知频道";
+          return (sourceGroup.list || []).map((item: any) => ({ ...item, sourceName }));
         });
 
-        const topItems = allItems.slice(0, 8); 
-
-        if (topItems.length === 0) {
-          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到相关资源。");
-        }
+        const topItems = allItems.slice(0, 8);
+        if (topItems.length === 0) return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到相关资源。");
 
         let responseTxt = `🔍 <b>"${keyword}"</b> 结果:\n\n`;
         const keyboard: any[][] = [];
 
         topItems.forEach((item: any, index: number) => {
           const num = index + 1;
-          const shareLink115 = (item.cloudLinks || []).find((l: string) => 
-            /115\.com\/s\//i.test(l) || /anxia\.com\/s\//i.test(l)
-          );
+          // 修复2: 增强链接识别
+          const shareLink = (item.cloudLinks || []).find((l: string) => /115\.com\/s\//i.test(l) || /anxia\.com\/s\//i.test(l));
           
-          // 在标题下方添加【来源频道】
-          responseTxt += `${num}. <b>${item.title}</b>\n`;
-          responseTxt += `📺 来源：<code>${item.sourceName}</code>\n\n`;
+          responseTxt += `${num}. <b>${item.title}</b>\n📺 来源：<code>${item.sourceName}</code>\n\n`;
 
-          if (shareLink115) {
-            try {
-              const url = new URL(shareLink115.trim());
-              const paths = url.pathname.split('/').filter(p => p && p !== 's');
-              const sc = paths[paths.length - 1] || "";
-              const pc = url.searchParams.get("password") || "";
-              
-              if (sc) {
-                keyboard.push([
-                  Markup.button.callback(`📥 转存 #${num}`, `sv|${sc}|${pc}|${index}`),
-                  Markup.button.callback(`🔔 追更 #${num}`, `mt|${sc}|${pc}|${index}`)
-                ]);
-              }
-            } catch (e) {
-              logger.error(`解析链接失败: ${shareLink115}`);
+          if (shareLink) {
+            // 修复3: 极其严谨的 sc 和 pc 提取逻辑，解决“未找到文件信息”
+            const cleanLink = shareLink.trim().replace(/\/$/, ""); // 移除末尾斜杠
+            const scMatch = cleanLink.match(/\/s\/([a-zA-Z0-9]+)/);
+            const sc = scMatch ? scMatch[1] : "";
+            
+            let pc = "";
+            try { 
+                const urlObj = new URL(cleanLink);
+                pc = urlObj.searchParams.get("password") || "";
+            } catch(e) { /* 兼容非标准URL */ }
+
+            if (sc) {
+              keyboard.push([
+                Markup.button.callback(`📥 转存 #${num}`, `sv|${sc}|${pc}|${index}`),
+                Markup.button.callback(`🔔 追更 #${num}`, `mt|${sc}|${pc}|${index}`)
+              ]);
             }
           }
         });
 
-        responseTxt += `--- --- --- --- ---\n📂 目标: <b>${folderName}</b>`;
-        
         await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, responseTxt, {
-          parse_mode: 'HTML',
-          ...Markup.inlineKeyboard(keyboard) 
+          parse_mode: 'HTML', ...Markup.inlineKeyboard(keyboard) 
         });
-      } catch (err) {
-        logger.error("搜索失败:", err);
-        ctx.reply("❌ 搜索失败");
-      }
+      } catch (err) { ctx.reply("❌ 搜索遇到问题"); }
     });
 
+    // --- Action Handlers ---
     this.bot.action(/^unmt\|(.+)$/, async (ctx) => {
-      const sc = ctx.match[1];
-      const deleted = await MonitorTask.destroy({ where: { shareCode: sc } });
-      if (deleted) await ctx.editMessageText(`❌ <b>已取消追更</b>`, { parse_mode: 'HTML' });
+      await MonitorTask.destroy({ where: { shareCode: ctx.match[1] } });
+      await ctx.editMessageText(`❌ <b>已取消追更</b>`, { parse_mode: 'HTML' });
     });
 
     this.bot.action(/^mt\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
@@ -233,18 +202,19 @@ class App {
       try {
         (this.cloud115Service as any).cookie = cookie;
         const shareInfo = await this.cloud115Service.getShareInfo(sc, pc);
-        const shareTitle = (shareInfo.data as any).share_title || "未命名";
+        if (!shareInfo?.data?.list) throw new Error("未找到文件列表");
+
+        const shareTitle = shareInfo.data.share_title || "未命名";
         const [task, created] = await MonitorTask.findOrCreate({
           where: { shareCode: sc },
           defaults: {
             title: shareTitle, receiveCode: pc, folderId,
-            processedFids: JSON.stringify((shareInfo.data.list || []).map((f: any) => f.fileId)),
+            processedFids: JSON.stringify(shareInfo.data.list.map((f: any) => f.fileId)),
             chatId: ctx.chat!.id
           }
         });
-        if (!created) return ctx.reply("⚠️ 已在监控中");
-        await ctx.reply(`✅ <b>追更已开启</b>\n📦 ${shareTitle}`, { parse_mode: 'HTML' });
-      } catch (err: any) { await ctx.reply(`❌ 失败: ${err.message}`); }
+        ctx.reply(created ? `✅ <b>追更已开启</b>\n📦 ${shareTitle}` : "⚠️ 已在监控中", { parse_mode: 'HTML' });
+      } catch (err: any) { ctx.reply(`❌ 失败: ${err.message}`); }
     });
 
     this.bot.action(/^sv\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
@@ -253,13 +223,15 @@ class App {
       try {
         (this.cloud115Service as any).cookie = cookie;
         const shareInfo = await this.cloud115Service.getShareInfo(sc, pc);
+        if (!shareInfo?.data?.list || shareInfo.data.list.length === 0) throw new Error("未找到文件信息");
+
         await this.cloud115Service.saveSharedFile({ 
             shareCode: sc, receiveCode: pc, 
-            fids: (shareInfo.data.list || []).map((f: any) => f.fileId), 
+            fids: shareInfo.data.list.map((f: any) => f.fileId), 
             folderId 
         });
-        await ctx.reply(`✅ 转存完成`);
-      } catch (err: any) { await ctx.reply(`❌ 失败: ${err.message}`); }
+        ctx.reply(`✅ 转存成功`);
+      } catch (err: any) { ctx.reply(`❌ 失败: ${err.message}`); }
     });
 
     this.bot.launch();
