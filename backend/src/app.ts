@@ -47,8 +47,17 @@ class App {
 
   // --- 工具方法：获取 115 Cookie ---
   private async get115Cookie(adminUserId: string): Promise<string | null> {
+    logger.info(`[Debug] 机器人正在尝试获取用户 ID 为 ${adminUserId} 的 Cookie...`);
     const userSetting = await UserSetting.findOne({ where: { userId: adminUserId } });
-    return userSetting?.dataValues.cloud115Cookie || null;
+    if (!userSetting) {
+        logger.warn(`[Debug] 数据库中找不到用户 ${adminUserId} 的设置记录`);
+        return null;
+    }
+    const cookie = userSetting.dataValues.cloud115Cookie;
+    if (!cookie) {
+        logger.warn(`[Debug] 用户 ${adminUserId} 的 115 Cookie 为空，请去网页端登录`);
+    }
+    return cookie || null;
   }
 
   // --- 工具方法：通过 ID 获取文件夹名称 ---
