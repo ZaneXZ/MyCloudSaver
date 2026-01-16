@@ -75,8 +75,9 @@ class App {
   private async getUserConfig(adminUserId: string) {
     const setting = await UserSetting.findOne({ where: { userId: adminUserId } });
     return {
-      cookie: setting?.get('cloud115Cookie') || null,
-      folderId: setting?.get('folderId') || "0"
+      // 修正：确保返回的是 string 而不是 null
+      cookie: (setting?.get('cloud115Cookie') as string) || "",
+      folderId: (setting?.get('folderId') as string) || "0"
     };
   }
 
@@ -88,6 +89,7 @@ class App {
       const tasks = await MonitorTask.findAll();
       for (const task of tasks) {
         try {
+          // 修正赋值
           this.cloud115Service.cookie = cookie;
           const shareInfo = await this.cloud115Service.getShareInfo(task.shareCode, task.receiveCode);
           const currentFiles = shareInfo.data.list || [];
@@ -108,7 +110,7 @@ class App {
           }
         } catch (err: any) { logger.error(`[追更异常]: ${err.message}`); }
       }
-    }, 12 * 60 * 60 * 1000); // 12小时检查一次
+    }, 12 * 60 * 60 * 1000);
   }
 
   private setupTelegramBot(): void {
@@ -130,6 +132,7 @@ class App {
 
     this.bot.command("folder", async (ctx) => {
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
+      // 修正赋值：确保不为 null
       this.cloud115Service.cookie = cookie;
       const pathName = cookie ? await this.cloud115Service.getFolderNameById(folderId) : "尚未配置 Cookie";
       ctx.reply(`📂 <b>当前转存位置：</b>\n<code>${pathName}</code>`, { parse_mode: 'HTML' });
@@ -160,6 +163,7 @@ class App {
         const loading = await ctx.reply(`正在检索 "${text}" 并智能排序...`);
         try {
           const { cookie, folderId } = await this.getUserConfig(adminUserId);
+          // 修正赋值
           this.cloud115Service.cookie = cookie;
           const pathName = await this.cloud115Service.getFolderNameById(folderId);
 
@@ -167,7 +171,6 @@ class App {
           let allItems = (result.data || []).flatMap((g: any) => g.list || []);
           if (allItems.length === 0) return ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined, "❌ 未找到相关资源");
 
-          // 核心排序：清晰度权重 > 文件体积
           allItems.sort((a: any, b: any) => {
             const qA = getQualityInfo(a.title).weight;
             const qB = getQualityInfo(b.title).weight;
@@ -198,7 +201,6 @@ class App {
           searchCache.set(userId, currentCache);
           resTxt += `💡 <b>回复数字 [1-${currentCache.length}] 即可一键转存</b>`;
 
-          // 修复点：将 disable_web_page_preview 替换为最新的 link_preview_options
           await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined, resTxt, { 
             parse_mode: 'HTML', 
             link_preview_options: { is_disabled: true } 
@@ -216,6 +218,7 @@ class App {
       const [, sc, pc] = ctx.match;
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
       try {
+        // 修正赋值
         this.cloud115Service.cookie = cookie;
         const info = await this.cloud115Service.getShareInfo(sc, pc);
         await MonitorTask.findOrCreate({
@@ -241,12 +244,13 @@ class App {
     const { cookie, folderId } = await this.getUserConfig(adminUserId);
     try {
       ctx.reply("⏳ 正在请求 115 转存，请稍候...");
+      // 修正赋值
       this.cloud115Service.cookie = cookie;
       const info = await this.cloud115Service.getShareInfo(sc, pc);
       const fids = info.data.list.map((f: any) => f.fileId);
       await this.cloud115Service.saveSharedFile({ shareCode: sc, receiveCode: pc, fids, folderId });
       
-      await ctx.reply(`✅ <b>转存成功！</b>\n📦 ${info.data.share_title}\n\n是否开启<b>自动追更</b>？（每12小时检查并同步新文件）`, {
+      await ctx.reply(`✅ <b>转存成功！</b>\n📦 ${info.data.share_title}\n\n是否开启<b>自动追更</b>？`, {
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           Markup.button.callback("🔔 开启追更", `mt|${sc}|${pc}|0`),
@@ -259,7 +263,6 @@ class App {
   public async start(): Promise<void> {
     try {
       await this.databaseService.initialize();
-      // 使用 sync({ alter: true }) 确保数据库结构随代码自动更新
       await UserSetting.sync({ alter: true });
       await MonitorTask.sync({ alter: true });
       this.app.listen(process.env.PORT || 8009, () => logger.info("🚀 System Active on port 8009"));
