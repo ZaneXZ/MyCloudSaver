@@ -22,7 +22,7 @@ interface Cloud115FolderItem {
 @injectable()
 export class Cloud115Service implements ICloudStorageService {
   private api: AxiosInstance;
-  public cookie: string = ""; // 改为 public 方便 App 类直接赋值
+  public cookie: string = ""; 
 
   constructor() {
     this.api = createAxiosInstance(
@@ -64,17 +64,16 @@ export class Cloud115Service implements ICloudStorageService {
   }
 
   /**
-   * 修改后的 getShareInfo
-   * 增加了对 share_title 的提取
+   * 获取分享信息
    */
-async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
+  async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const response = await this.api.get("/share/snap", {
       params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 20, cid: "" },
     });
 
     const resData = response.data;
     if (resData?.state && resData.data) {
-      // 核心修复：115 标题可能在 data.share_title 或 data.title
+      // 提取分享标题，增加多层级兼容
       const title = resData.data.share_title || resData.data.title || "未命名资源";
       
       return {
@@ -88,31 +87,14 @@ async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoRespon
         },
       };
     } else {
+      logger.error("获取分享信息失败:", resData);
       throw new Error(resData?.error || "获取分享信息失败");
     }
   }
 
-    const resData = response.data;
-    
-    // 115 的数据结构通常在 resData.data 中
-    if (resData?.state && resData.data?.list) {
-      return {
-        data: {
-          // --- 核心修改：提取分享标题 ---
-          share_title: resData.data.share_title || "未命名资源",
-          list: resData.data.list.map((item: Cloud115ListItem) => ({
-            fileId: item.cid,
-            fileName: item.n,
-            fileSize: item.s,
-          })),
-        },
-      };
-    } else {
-      logger.error("未找到文件信息:", resData);
-      throw new Error(resData?.error || "未找到文件信息");
-    }
-  }
-
+  /**
+   * 获取目录列表
+   */
   async getFolderList(parentCid = "0"): Promise<FolderListResponse> {
     const response = await this.api.get("/files", {
       params: {
@@ -149,18 +131,24 @@ async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoRespon
     }
   }
 
+  /**
+   * 保存分享文件
+   */
   async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
+    // 115 批量保存通常支持 fid 逗号分隔，这里根据你的 fids 数组处理
     const param = new URLSearchParams({
-      cid: params.folderId || "",
+      cid: params.folderId || "0",
       share_code: params.shareCode || "",
       receive_code: params.receiveCode || "",
-      file_id: params.fids?.[0] || "",
+      fid: params.fids?.join(",") || "", 
     });
+
     const response = await this.api.post("/share/receive", param.toString());
-    logger.info("保存文件:", response.data);
+    logger.info("保存文件响应:", response.data);
+
     if (response.data.state) {
       return {
-        message: response.data.error,
+        message: response.data.error || "保存成功",
         data: response.data.data,
       };
     } else {
