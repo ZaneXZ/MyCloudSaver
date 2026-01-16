@@ -5,7 +5,6 @@ import { injectable } from "inversify";
 import { Request } from "express";
 import { ICloudStorageService } from "@/types/services";
 import { logger } from "../utils/logger";
-import qs from "qs";
 
 @injectable()
 export class Cloud115Service implements ICloudStorageService {
@@ -29,7 +28,9 @@ export class Cloud115Service implements ICloudStorageService {
     });
   }
 
-  // 获取完整路径文字
+  /**
+   * 获取完整路径文字 (CID -> Path String)
+   */
   async getFolderNameById(cid: string): Promise<string> {
     if (!cid || cid === "0") return "根目录";
     try {
@@ -40,11 +41,15 @@ export class Cloud115Service implements ICloudStorageService {
       }
       return `目录(${cid})`;
     } catch (error) {
+      logger.error(`[115Service] 获取目录名失败: ${cid}`);
       return `目录(${cid})`;
     }
   }
 
-  // 仅检索已有路径，不创建
+  /**
+   * 仅检索已有路径 (Path String -> CID)
+   * 移除创建逻辑，避免 POST 405 风险
+   */
   async resolvePathToId(path: string): Promise<string> {
     const folders = path.split(/[\/\\]/).filter(p => p.trim() !== "");
     let currentCid = "0";
@@ -60,12 +65,15 @@ export class Cloud115Service implements ICloudStorageService {
       if (target) {
         currentCid = target.cid || target.id;
       } else {
-        throw new Error(`路径不存在: "${folderName}"，请先在 115 网页端创建。`);
+        throw new Error(`路径不存在: "${folderName}"，请先在网页端手动创建。`);
       }
     }
     return currentCid;
   }
 
+  /**
+   * 获取分享快照信息
+   */
   async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const response = await this.api.get("/share/snap", {
       params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 100 },
@@ -86,16 +94,19 @@ export class Cloud115Service implements ICloudStorageService {
     throw new Error(resData?.error || "115链接提取失败");
   }
 
-  // 转存依然需要 POST，但使用了更稳妥的 qs 序列化
+  /**
+   * 转存文件 (核心修复)
+   * 使用原生 URLSearchParams 处理 form-urlencoded 格式
+   */
   async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
-    const postData = qs.stringify({
-      cid: params.folderId || "0",
-      share_code: params.shareCode || "",
-      receive_code: params.receiveCode || "",
-      fid: params.fids?.join(",") || "",
-    });
+    // 使用内置 URLSearchParams 序列化数据
+    const body = new URLSearchParams();
+    body.append("cid", params.folderId || "0");
+    body.append("share_code", params.shareCode || "");
+    body.append("receive_code", params.receiveCode || "");
+    body.append("fid", params.fids?.join(",") || "");
 
-    const response = await this.api.post("https://115.com/webapi/share/receive", postData, {
+    const response = await this.api.post("https://115.com/webapi/share/receive", body.toString(), {
       headers: { 
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Referer": `https://115.com/s/${params.shareCode}`
@@ -105,10 +116,11 @@ export class Cloud115Service implements ICloudStorageService {
     if (response.data && response.data.state) {
       return { message: "成功", data: response.data.data };
     }
-    throw new Error(response.data?.error || response.data?.msg || "转存失败");
+    throw new Error(response.data?.error || response.data?.msg || "115转存失败");
   }
 
   async setCookie(req: Request): Promise<void> {}
+
   async getFolderList(parentCid = "0"): Promise<FolderListResponse> {
     const response = await this.api.get("/files", { params: { cid: parentCid, format: "json" } });
     return { data: response.data?.data?.map((f:any)=>({ cid:f.cid, name:f.n })) || [] };
