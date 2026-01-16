@@ -75,7 +75,6 @@ class App {
   private async getUserConfig(adminUserId: string) {
     const setting = await UserSetting.findOne({ where: { userId: adminUserId } });
     return {
-      // 修正：确保返回的是 string 而不是 null
       cookie: (setting?.get('cloud115Cookie') as string) || "",
       folderId: (setting?.get('folderId') as string) || "0"
     };
@@ -89,7 +88,6 @@ class App {
       const tasks = await MonitorTask.findAll();
       for (const task of tasks) {
         try {
-          // 修正赋值
           this.cloud115Service.cookie = cookie;
           const shareInfo = await this.cloud115Service.getShareInfo(task.shareCode, task.receiveCode);
           const currentFiles = shareInfo.data.list || [];
@@ -119,6 +117,14 @@ class App {
     if (!token) return;
     this.bot = new Telegraf(token);
 
+    // --- 新增：自动注册快捷菜单指令 ---
+    this.bot.telegram.setMyCommands([
+      { command: 'search', description: '🔍 进入搜索模式' },
+      { command: 'task', description: '📋 查看/管理追更任务' },
+      { command: 'folder', description: '📂 查看当前转存目录' },
+      { command: 'cancel', description: '⏹ 退出当前模式' }
+    ]).catch(err => logger.error("注册菜单失败:", err));
+
     this.bot.command("cancel", (ctx) => {
       userState.delete(ctx.from.id);
       searchCache.delete(ctx.from.id);
@@ -132,18 +138,28 @@ class App {
 
     this.bot.command("folder", async (ctx) => {
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
-      // 修正赋值：确保不为 null
       this.cloud115Service.cookie = cookie;
       const pathName = cookie ? await this.cloud115Service.getFolderNameById(folderId) : "尚未配置 Cookie";
       ctx.reply(`📂 <b>当前转存位置：</b>\n<code>${pathName}</code>`, { parse_mode: 'HTML' });
     });
 
     this.bot.command("task", async (ctx) => {
-      const tasks = await MonitorTask.findAll();
-      if (tasks.length === 0) return ctx.reply("📋 无正在追更的任务");
-      let msg = "📋 <b>当前追更列表：</b>\n\n";
-      const kb = tasks.map(t => [Markup.button.callback(`❌ 取消: ${t.title.slice(0,12)}...`, `unmt|${t.shareCode}`)]);
-      ctx.reply(msg, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
+      try {
+        const tasks = await MonitorTask.findAll();
+        // 修正：增加空状态反馈
+        if (!tasks || tasks.length === 0) {
+          return ctx.reply("📋 <b>当前没有正在追更的任务。</b>", { parse_mode: 'HTML' });
+        }
+        let msg = "📋 <b>当前追更列表：</b>\n━━━━━━━━━━━━━━\n";
+        const kb = tasks.map(t => {
+          const shortTitle = t.title.length > 15 ? t.title.slice(0, 15) + '...' : t.title;
+          return [Markup.button.callback(`❌ 取消: ${shortTitle}`, `unmt|${t.shareCode}`)];
+        });
+        ctx.reply(msg, { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
+      } catch (err: any) {
+        logger.error(`[Task Error]: ${err.message}`);
+        ctx.reply("❌ 获取任务列表失败");
+      }
     });
 
     this.bot.on("text", async (ctx) => {
@@ -163,7 +179,6 @@ class App {
         const loading = await ctx.reply(`正在检索 "${text}" 并智能排序...`);
         try {
           const { cookie, folderId } = await this.getUserConfig(adminUserId);
-          // 修正赋值
           this.cloud115Service.cookie = cookie;
           const pathName = await this.cloud115Service.getFolderNameById(folderId);
 
@@ -218,7 +233,6 @@ class App {
       const [, sc, pc] = ctx.match;
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
       try {
-        // 修正赋值
         this.cloud115Service.cookie = cookie;
         const info = await this.cloud115Service.getShareInfo(sc, pc);
         await MonitorTask.findOrCreate({
@@ -244,7 +258,6 @@ class App {
     const { cookie, folderId } = await this.getUserConfig(adminUserId);
     try {
       ctx.reply("⏳ 正在请求 115 转存，请稍候...");
-      // 修正赋值
       this.cloud115Service.cookie = cookie;
       const info = await this.cloud115Service.getShareInfo(sc, pc);
       const fids = info.data.list.map((f: any) => f.fileId);
