@@ -3,19 +3,33 @@
 class App {
   // ... (属性定义保持不变)
 
+// --- 增强版：通过 ID 获取文件夹真实名称 ---
   private async getFolderName(folderId: string, cookie: string): Promise<string> {
     if (folderId === "0" || !folderId) return "根目录";
     try {
       const resp = await axios.get(`https://webapi.115.com/files/getid?cid=${folderId}`, {
         headers: { 
           'Cookie': cookie,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/115.0.0.0 Safari/537.36',
-          'Referer': 'https://115.com/'
-        }
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': `https://115.com/?cid=${folderId}&offset=0&mode=wangpan`,
+          'Accept': '*/*'
+        },
+        timeout: 5000 // 5秒超时
       });
-      return resp.data?.name || `目录(${folderId})`;
-    } catch (e) {
-      return `目录(${folderId})`;
+
+      // 115 API 可能返回 name 或 file_name，这里做双重校验
+      const folderName = resp.data?.name || resp.data?.file_name;
+      
+      if (folderName) {
+        return folderName;
+      } else {
+        // 如果 API 返回成功但没有名字，可能是被限制了，记录一下日志
+        logger.warn(`115返回数据中未找到名称: ${JSON.stringify(resp.data)}`);
+        return `未命名目录(${folderId})`;
+      }
+    } catch (e: any) {
+      logger.error(`获取文件夹名称失败 (ID: ${folderId}): ${e.message}`);
+      return `目录(${folderId})`; // 最终保底
     }
   }
 
