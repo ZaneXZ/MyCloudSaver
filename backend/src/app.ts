@@ -80,35 +80,40 @@ class App {
     }
   }
 
-  // --- 核心增强：路径解析函数（仅查询） ---
-  private async resolvePathToId(pathStr: string, cookie: string): Promise<string> {
-    const folders = pathStr.split('/')
-        .map(p => p.trim())
-        .filter(p => p !== "" && p !== "根目录" && p !== "首页");
-        
-    let currentId = "0"; 
-
-    for (const folderName of folders) {
-      const listUrl = `https://webapi.115.com/files?aid=1&cid=${currentId}&o=user_ptime&asc=0&offset=0&limit=1000&format=json`;
-      const listResp = await axios.get(listUrl, { 
+private async getFolderName(folderId: string, cookie: string): Promise<string> {
+    if (folderId === "0" || !folderId) return "根目录";
+    try {
+      // 尝试使用更详细的目录查询接口
+      const resp = await axios.get(`https://webapi.115.com/files/getid?cid=${folderId}`, {
         headers: { 
-            'Cookie': cookie,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://115.com/'
-        } 
+          'Cookie': cookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Referer': `https://115.com/?cid=${folderId}&offset=0&mode=wangpan`
+        }
+      });
+
+      // 115 的 API 可能会把名字放在这几个字段中的任何一个
+      const data = resp.data;
+      const folderName = data.name || data.file_name || data.n || (data.data && data.data[0] ? data.data[0].n : null);
+      
+      if (folderName) {
+        return folderName;
+      }
+
+      // 如果上述都没找到，尝试第二个备用接口 (category/get)
+      const backupResp = await axios.get(`https://webapi.115.com/category/get?cid=${folderId}`, {
+        headers: { 'Cookie': cookie, 'Referer': 'https://115.com/' }
       });
       
-      const fileList = listResp.data?.data || listResp.data?.list || [];
-      // 在当前层级寻找同名的文件夹
-      const target = fileList.find((f: any) => f.n === folderName && (f.fid === undefined || f.p === undefined));
-
-      if (target) {
-        currentId = target.cid;
-      } else {
-        throw new Error(`找不到文件夹: "${folderName}"。请确保你在 115 中已经手动创建了该路径。`);
+      if (backupResp.data && backupResp.data.data && backupResp.data.data.file_name) {
+        return backupResp.data.data.file_name;
       }
+
+      return `目录(${folderId})`; 
+    } catch (e: any) {
+      logger.error(`查询 ID ${folderId} 失败: ${e.message}`);
+      return `目录(${folderId})`;
     }
-    return currentId;
   }
 
   private setupTelegramBot(): void {
