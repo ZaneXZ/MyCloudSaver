@@ -3,7 +3,6 @@ import { createAxiosInstance } from "../utils/axiosInstance";
 import { ShareInfoResponse, FolderListResponse, SaveFileParams } from "../types/cloud";
 import { injectable } from "inversify";
 import { Request } from "express";
-import UserSetting from "../models/UserSetting";
 import { ICloudStorageService } from "@/types/services";
 import { logger } from "../utils/logger";
 
@@ -29,26 +28,35 @@ export class Cloud115Service implements ICloudStorageService {
   }
 
   /**
-   * 核心新增：通过路径字符串获取文件夹 CID
-   * 支持格式: "/电影/欧美" 或 "电影/欧美"
+   * 将文件夹 CID 转换为人类可读名称
    */
+  async getFolderNameById(cid: string): Promise<string> {
+    if (!cid || cid === "0") return "根目录";
+    try {
+      const response = await this.api.get("https://webapi.115.com/files/getid", {
+        params: { cid: cid }
+      });
+      return response.data?.name || `目录(${cid})`;
+    } catch (error) {
+      logger.error(`[115Service] 获取目录名失败: ${cid}`);
+      return `目录(${cid})`;
+    }
+  }
+
   async getCidByPath(path: string): Promise<string> {
     const folders = path.split('/').filter(p => p.trim() !== "");
-    let currentCid = "0"; // 从根目录开始
+    let currentCid = "0";
 
     for (const folderName of folders) {
       const response = await this.api.get("/files", {
-        params: { cid: currentCid, show_dir: 1, limit: 100, format: "json" }
+        params: { cid: currentCid, show_dir: 1, limit: 1000, format: "json" }
       });
-
       const list = response.data?.data || [];
-      // 过滤出名字匹配且是文件夹的项目 (n 是名称, fid 存在通常表示是文件, cid 存在表示是文件夹)
       const target = list.find((item: any) => item.n === folderName && !item.fid); 
-      
       if (target) {
         currentCid = target.cid;
       } else {
-        throw new Error(`在目录(ID:${currentCid})下未找到文件夹: "${folderName}"`);
+        throw new Error(`未找到文件夹: "${folderName}"`);
       }
     }
     return currentCid;
@@ -56,7 +64,7 @@ export class Cloud115Service implements ICloudStorageService {
 
   async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const response = await this.api.get("/share/snap", {
-      params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 20, cid: "" },
+      params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 100, cid: "" },
     });
 
     const resData = response.data;
@@ -66,9 +74,9 @@ export class Cloud115Service implements ICloudStorageService {
         data: {
           share_title: title,
           list: (resData.data.list || []).map((item: any) => ({
-            fileId: item.cid || item.fid,
+            fileId: item.fid || item.cid,
             fileName: item.n || item.fn,
-            fileSize: item.s || item.fz,
+            fileSize: Number(item.s || item.fz || 0), // 确保是数字
           })),
         },
       };
@@ -79,10 +87,10 @@ export class Cloud115Service implements ICloudStorageService {
 
   async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
     const param = new URLSearchParams({
-      cid: params.folderId || "0",       // 确保是 cid
+      cid: params.folderId || "0",
       share_code: params.shareCode || "",
       receive_code: params.receiveCode || "",
-      fid: params.fids?.join(",") || "", // 确保是 fid
+      fid: params.fids?.join(",") || "",
     });
 
     const response = await this.api.post("/share/receive", param.toString());
@@ -93,8 +101,8 @@ export class Cloud115Service implements ICloudStorageService {
     }
   }
 
-  // 实现接口要求的其他方法...
-  async setCookie(req: Request): Promise<void> { /* 已有逻辑 */ }
+  async setCookie(req: Request): Promise<void> {}
+
   async getFolderList(parentCid = "0"): Promise<FolderListResponse> {
     const response = await this.api.get("/files", { params: { cid: parentCid, format: "json" } });
     return { data: response.data?.data?.map((f:any)=>({ cid:f.cid, name:f.n })) || [] };
