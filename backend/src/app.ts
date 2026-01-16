@@ -46,7 +46,7 @@ class App {
     this.app.use(errorHandler);
   }
 
-  // --- 核心：从数据库获取用户配置（Cookie 和 FolderId） ---
+  // --- 从数据库获取用户配置 ---
   private async getUserConfig(adminUserId: string) {
     const setting = await UserSetting.findOne({ where: { userId: adminUserId } });
     return {
@@ -120,25 +120,21 @@ class App {
       { command: 'setfolder', description: '✍️ 设置路径' }
     ]);
 
-    // --- 持久化：查看目录 ---
     this.bot.command("folder", async (ctx) => {
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
       if (!cookie) return ctx.reply("❌ 请先配置 115 Cookie");
       const folderName = await this.getFolderName(folderId, cookie);
-      ctx.reply(`📂 <b>当前持久化转存目录：</b>\n\n名称：${folderName}\nID：<code>${folderId}</code>`, { parse_mode: 'HTML' });
+      ctx.reply(`📂 <b>当前转存目录：</b>\n\n名称：${folderName}\nID：<code>${folderId}</code>`, { parse_mode: 'HTML' });
     });
 
-    // --- 持久化：设置目录 ---
     this.bot.command("setfolder", async (ctx) => {
       const folderId = ctx.payload;
       if (!folderId) return ctx.reply("💡 请输入 ID：/setfolder 12345");
-      
       const [setting] = await UserSetting.findOrCreate({ where: { userId: adminUserId } });
       await setting.update({ folderId });
-      
       const { cookie } = await this.getUserConfig(adminUserId);
-      const folderName = cookie ? await this.getFolderName(folderId, cookie) : "设置成功（待获取名称）";
-      ctx.reply(`✅ <b>目录已持久化保存</b>\n\n新目录：${folderName}`, { parse_mode: 'HTML' });
+      const folderName = cookie ? await this.getFolderName(folderId, cookie) : "设置成功";
+      ctx.reply(`✅ <b>目录已保存</b>\n\n新目录：${folderName}`, { parse_mode: 'HTML' });
     });
 
     this.bot.command("tasks", async (ctx) => {
@@ -153,6 +149,7 @@ class App {
       }
     });
 
+    // --- 修改后的搜索逻辑：支持多行独立按钮 ---
     this.bot.command("search", async (ctx) => {
       const keyword = ctx.payload;
       if (!keyword) return ctx.reply("💡 请输入关键词");
@@ -163,29 +160,43 @@ class App {
       try {
         const result = await this.searcher.searchAll(keyword);
         const allItems = (result.data || []).flatMap((c: any) => c.list || []);
-        const topItems = allItems.slice(0, 10);
-        if (topItems.length === 0) return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到。");
+        const topItems = allItems.slice(0, 8); // 取前 8 条，避免按钮过多超过 Telegram 限制
+        
+        if (topItems.length === 0) {
+          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到。");
+        }
 
         let responseTxt = `🔍 <b>"${keyword}"</b> 结果:\n\n`;
         const keyboard: any[][] = [];
+
         topItems.forEach((item: any, index: number) => {
+          const num = index + 1;
           const shareLink115 = item.cloudLinks?.find((l: string) => /115\.com\/s\//.test(l));
-          responseTxt += `${index + 1}. <b>${item.title}</b>\n\n`;
+          
+          responseTxt += `${num}. <b>${item.title}</b>\n\n`;
+
           if (shareLink115) {
             const url = new URL(shareLink115);
             const sc = url.pathname.split('/').filter(p => p && p !== 's').pop() || "";
             const pc = url.searchParams.get("password") || "";
+            
+            // 为每一行结果添加独立的一行按钮
             keyboard.push([
-              Markup.button.callback(`立即转存`, `sv|${sc}|${pc}|${index}`),
-              Markup.button.callback(`🔔 开启追更`, `mt|${sc}|${pc}|${index}`)
+              Markup.button.callback(`📥 转存 #${num}`, `sv|${sc}|${pc}|${index}`),
+              Markup.button.callback(`🔔 追更 #${num}`, `mt|${sc}|${pc}|${index}`)
             ]);
           }
         });
-        responseTxt += `📂 目标: <b>${folderName}</b>`;
+
+        responseTxt += `--- --- --- --- ---\n📂 目标: <b>${folderName}</b>`;
+        
         await ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, responseTxt, {
-          parse_mode: 'HTML', ...Markup.inlineKeyboard(keyboard)
+          parse_mode: 'HTML',
+          ...Markup.inlineKeyboard(keyboard) 
         });
-      } catch (err) { ctx.reply("❌ 搜索失败"); }
+      } catch (err) {
+        ctx.reply("❌ 搜索失败");
+      }
     });
 
     this.bot.action(/^unmt\|(.+)$/, async (ctx) => {
@@ -235,7 +246,7 @@ class App {
   public async start(): Promise<void> {
     try {
       await this.databaseService.initialize();
-      await UserSetting.sync({ alter: true }); // 确保 folderId 字段存在
+      await UserSetting.sync({ alter: true });
       await MonitorTask.sync({ alter: true });
       this.app.listen(process.env.PORT || 8009);
     } catch (error) { process.exit(1); }
