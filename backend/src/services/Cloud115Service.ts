@@ -1,4 +1,4 @@
-import { AxiosHeaders, AxiosInstance } from "axios"; // 导入 AxiosHeaders
+import { AxiosHeaders, AxiosInstance } from "axios";
 import { createAxiosInstance } from "../utils/axiosInstance";
 import { ShareInfoResponse, FolderListResponse, SaveFileParams } from "../types/cloud";
 import { injectable } from "inversify";
@@ -22,7 +22,7 @@ interface Cloud115FolderItem {
 @injectable()
 export class Cloud115Service implements ICloudStorageService {
   private api: AxiosInstance;
-  private cookie: string = "";
+  public cookie: string = ""; // 改为 public 方便 app.ts 直接赋值
 
   constructor() {
     this.api = createAxiosInstance(
@@ -34,12 +34,12 @@ export class Cloud115Service implements ICloudStorageService {
         Origin: "",
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 MicroMessenger/6.8.0(0x16080000) NetType/WIFI MiniProgramEnv/Mac MacWechat/WMPF MacWechat/3.8.9(0x13080910) XWEB/1227",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         Accept: "*/*",
         "Sec-Fetch-Site": "cross-site",
         "Sec-Fetch-Mode": "cors",
         "Sec-Fetch-Dest": "empty",
-        Referer: "https://servicewechat.com/wx2c744c010a61b0fa/94/page-frame.html",
+        Referer: "https://115.com/",
         "Accept-Encoding": "gzip, deflate, br",
         "Accept-Language": "zh-CN,zh;q=0.9",
       })
@@ -73,10 +73,14 @@ export class Cloud115Service implements ICloudStorageService {
         cid: "",
       },
     });
-    if (response.data?.state && response.data.data?.list?.length > 0) {
+
+    const resData = response.data;
+    if (resData?.state && resData.data?.list?.length > 0) {
       return {
         data: {
-          list: response.data.data.list.map((item: Cloud115ListItem) => ({
+          // 核心修复：添加 share_title 字段，解决编译报错
+          share_title: resData.data.share_title || resData.data.title || "未知分享资源",
+          list: resData.data.list.map((item: Cloud115ListItem) => ({
             fileId: item.cid,
             fileName: item.n,
             fileSize: item.s,
@@ -84,8 +88,8 @@ export class Cloud115Service implements ICloudStorageService {
         },
       };
     } else {
-      logger.error("未找到文件信息:", response.data);
-      throw new Error("未找到文件信息");
+      logger.error("未找到文件信息:", resData);
+      throw new Error(resData?.error || "未找到文件信息");
     }
   }
 
@@ -101,12 +105,6 @@ export class Cloud115Service implements ICloudStorageService {
         limit: 50,
         type: 0,
         format: "json",
-        star: 0,
-        suffix: "",
-        natsort: 0,
-        snap: 0,
-        record_open_time: 1,
-        fc_mix: 0,
       },
     });
     if (response.data?.state) {
@@ -126,22 +124,26 @@ export class Cloud115Service implements ICloudStorageService {
   }
 
   async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
+    // 增强：将 fids 数组转为逗号分隔的字符串，支持批量转存
+    const fileIds = Array.isArray(params.fids) ? params.fids.join(",") : params.fids;
+
     const param = new URLSearchParams({
-      cid: params.folderId || "",
+      cid: params.folderId || "0",
       share_code: params.shareCode || "",
       receive_code: params.receiveCode || "",
-      file_id: params.fids?.[0] || "",
+      file_id: fileIds || "",
     });
+
     const response = await this.api.post("/share/receive", param.toString());
-    logger.info("保存文件:", response.data);
+    
     if (response.data.state) {
       return {
-        message: response.data.error,
+        message: response.data.error || "保存成功",
         data: response.data.data,
       };
     } else {
       logger.error("保存文件失败:", response.data.error);
-      throw new Error("保存115pan文件失败:" + response.data.error);
+      throw new Error(response.data.error || "保存115pan文件失败");
     }
   }
 }
