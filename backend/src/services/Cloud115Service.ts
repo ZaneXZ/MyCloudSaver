@@ -1,4 +1,4 @@
-import { AxiosHeaders, AxiosInstance } from "axios"; // 导入 AxiosHeaders
+import { AxiosHeaders, AxiosInstance } from "axios";
 import { createAxiosInstance } from "../utils/axiosInstance";
 import { ShareInfoResponse, FolderListResponse, SaveFileParams } from "../types/cloud";
 import { injectable } from "inversify";
@@ -22,7 +22,7 @@ interface Cloud115FolderItem {
 @injectable()
 export class Cloud115Service implements ICloudStorageService {
   private api: AxiosInstance;
-  private cookie: string = "";
+  public cookie: string = ""; // 改为 public 方便 App 类直接赋值
 
   constructor() {
     this.api = createAxiosInstance(
@@ -63,6 +63,10 @@ export class Cloud115Service implements ICloudStorageService {
     }
   }
 
+  /**
+   * 修改后的 getShareInfo
+   * 增加了对 share_title 的提取
+   */
   async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const response = await this.api.get("/share/snap", {
       params: {
@@ -73,10 +77,16 @@ export class Cloud115Service implements ICloudStorageService {
         cid: "",
       },
     });
-    if (response.data?.state && response.data.data?.list?.length > 0) {
+
+    const resData = response.data;
+    
+    // 115 的数据结构通常在 resData.data 中
+    if (resData?.state && resData.data?.list) {
       return {
         data: {
-          list: response.data.data.list.map((item: Cloud115ListItem) => ({
+          // --- 核心修改：提取分享标题 ---
+          share_title: resData.data.share_title || "未命名资源",
+          list: resData.data.list.map((item: Cloud115ListItem) => ({
             fileId: item.cid,
             fileName: item.n,
             fileSize: item.s,
@@ -84,8 +94,8 @@ export class Cloud115Service implements ICloudStorageService {
         },
       };
     } else {
-      logger.error("未找到文件信息:", response.data);
-      throw new Error("未找到文件信息");
+      logger.error("未找到文件信息:", resData);
+      throw new Error(resData?.error || "未找到文件信息");
     }
   }
 
