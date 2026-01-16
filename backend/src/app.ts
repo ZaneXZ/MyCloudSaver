@@ -117,7 +117,7 @@ class App {
     if (!token) return;
     this.bot = new Telegraf(token);
 
-    // --- 新增：自动注册快捷菜单指令 ---
+    // 自动注册快捷指令
     this.bot.telegram.setMyCommands([
       { command: 'search', description: '🔍 进入搜索模式' },
       { command: 'task', description: '📋 查看/管理追更任务' },
@@ -146,7 +146,6 @@ class App {
     this.bot.command("task", async (ctx) => {
       try {
         const tasks = await MonitorTask.findAll();
-        // 修正：增加空状态反馈
         if (!tasks || tasks.length === 0) {
           return ctx.reply("📋 <b>当前没有正在追更的任务。</b>", { parse_mode: 'HTML' });
         }
@@ -229,25 +228,30 @@ class App {
       await ctx.editMessageText("❌ <b>自动追更已取消</b>", { parse_mode: 'HTML' });
     });
 
+    // --- 核心修复：开启追更 Action ---
     this.bot.action(/^mt\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
       const [, sc, pc] = ctx.match;
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
       try {
         this.cloud115Service.cookie = cookie;
         const info = await this.cloud115Service.getShareInfo(sc, pc);
-        await MonitorTask.findOrCreate({
-          where: { shareCode: sc },
-          defaults: { 
-            title: info.data.share_title, 
-            receiveCode: pc, 
-            folderId, 
-            processedFids: JSON.stringify(info.data.list.map((f:any)=>f.fileId)), 
-            chatId: ctx.chat!.id 
-          }
+        
+        // 使用 upsert (Update or Insert) 解决 unique 冲突
+        await MonitorTask.upsert({
+          shareCode: sc,
+          title: info.data.share_title || "未命名任务", 
+          receiveCode: pc, 
+          folderId: folderId || "0", 
+          processedFids: JSON.stringify(info.data.list.map((f: any) => f.fileId)), 
+          chatId: ctx.chat!.id 
         });
-        await ctx.answerCbQuery("追更任务已创建");
-        await ctx.reply(`✅ <b>成功开启追更：</b> ${info.data.share_title}`, { parse_mode: 'HTML' });
-      } catch (err: any) { ctx.reply("❌ 开启追更失败"); }
+
+        await ctx.answerCbQuery("✅ 追更任务已创建/同步");
+        await ctx.reply(`✅ <b>成功开启追更：</b>\n📦 ${info.data.share_title}`, { parse_mode: 'HTML' });
+      } catch (err: any) { 
+        logger.error(`[Monitor Error]: ${err.message}`);
+        ctx.reply("❌ 开启追更失败，请检查 115 链接是否有效"); 
+      }
     });
 
     this.bot.action("cancel_action", (ctx) => ctx.deleteMessage());
@@ -276,6 +280,7 @@ class App {
   public async start(): Promise<void> {
     try {
       await this.databaseService.initialize();
+      // 关键：同步表结构
       await UserSetting.sync({ alter: true });
       await MonitorTask.sync({ alter: true });
       this.app.listen(process.env.PORT || 8009, () => logger.info("🚀 System Active on port 8009"));
