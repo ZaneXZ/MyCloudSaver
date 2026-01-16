@@ -74,33 +74,37 @@ class App {
       const cookie = await this.get115Cookie(adminUserId);
       if (!cookie) return;
 
-      const tasks = await MonitorTask.findAll();
-      for (const task of tasks) {
-        try {
-          (this.cloud115Service as any).cookie = cookie;
-          const shareInfo = await this.cloud115Service.getShareInfo(task.shareCode, task.receiveCode);
-          const currentFiles = shareInfo.data.list || [];
-          const processedFids = new Set<string>(JSON.parse(task.processedFids));
-          const newFiles = currentFiles.filter((f: any) => !processedFids.has(f.fileId));
+      try {
+        const tasks = await MonitorTask.findAll();
+        for (const task of tasks) {
+          try {
+            (this.cloud115Service as any).cookie = cookie;
+            const shareInfo = await this.cloud115Service.getShareInfo(task.shareCode, task.receiveCode);
+            const currentFiles = shareInfo.data.list || [];
+            const processedFids = new Set<string>(JSON.parse(task.processedFids));
+            const newFiles = currentFiles.filter((f: any) => !processedFids.has(f.fileId));
 
-          if (newFiles.length > 0) {
-            const newFids = newFiles.map((f: any) => f.fileId);
-            await this.cloud115Service.saveSharedFile({
-              shareCode: task.shareCode, receiveCode: task.receiveCode,
-              fids: newFids, folderId: task.folderId
-            });
-            newFiles.forEach((f: any) => processedFids.add(f.fileId));
-            task.processedFids = JSON.stringify(Array.from(processedFids));
-            await task.save();
+            if (newFiles.length > 0) {
+              const newFids = newFiles.map((f: any) => f.fileId);
+              await this.cloud115Service.saveSharedFile({
+                shareCode: task.shareCode, receiveCode: task.receiveCode,
+                fids: newFids, folderId: task.folderId
+              });
+              newFiles.forEach((f: any) => processedFids.add(f.fileId));
+              task.processedFids = JSON.stringify(Array.from(processedFids));
+              await task.save();
 
-            await this.bot.telegram.sendMessage(task.chatId, 
-              `🔔 <b>追更通知</b>\n📦 资源：${task.title}\n✨ 检测到 ${newFiles.length} 个新文件已存入网盘。`,
-              { parse_mode: 'HTML' }
-            );
+              await this.bot.telegram.sendMessage(task.chatId, 
+                `🔔 <b>追更通知</b>\n📦 资源：${task.title}\n✨ 检测到 ${newFiles.length} 个新文件已存入网盘。`,
+                { parse_mode: 'HTML' }
+              );
+            }
+          } catch (err: any) {
+            logger.error(`[追更异常] ${task.title}: ${err.message}`);
           }
-        } catch (err: any) {
-          logger.error(`[追更异常] ${task.title}: ${err.message}`);
         }
+      } catch (dbErr) {
+        logger.error("读取监控任务数据库失败");
       }
     }, TWELVE_HOURS);
   }
@@ -118,7 +122,6 @@ class App {
       { command: 'setfolder', description: '✍️ 设置路径' }
     ]);
 
-    // --- 修改后的 tasks 指令，带有取消按钮 ---
     this.bot.command("tasks", async (ctx) => {
       const tasks = await MonitorTask.findAll();
       if (tasks.length === 0) return ctx.reply("📋 目前没有正在追更的任务。");
@@ -138,7 +141,6 @@ class App {
       }
     });
 
-    // 搜索逻辑
     this.bot.command("search", async (ctx) => {
       const keyword = ctx.payload;
       if (!keyword) return ctx.reply("💡 请输入关键词");
@@ -175,7 +177,6 @@ class App {
       } catch (err) { ctx.reply("❌ 搜索失败"); }
     });
 
-    // --- 回调：取消追更 ---
     this.bot.action(/^unmt\|(.+)$/, async (ctx) => {
       const sc = ctx.match[1];
       try {
@@ -191,7 +192,6 @@ class App {
       }
     });
 
-    // 回调：开启追更 (mt)
     this.bot.action(/^mt\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
       const [, sc, pc] = ctx.match;
       const folderId = this.userFolders.get(ctx.from!.id) || "0";
@@ -200,10 +200,14 @@ class App {
         (this.cloud115Service as any).cookie = cookie;
         const shareInfo = await this.cloud115Service.getShareInfo(sc, pc);
         const files = shareInfo.data.list || [];
+        
+        // 使用 any 解决 share_title 编译报错问题
+        const shareTitle = (shareInfo.data as any).share_title || "未命名资源";
+
         const [task, created] = await MonitorTask.findOrCreate({
           where: { shareCode: sc },
           defaults: {
-            title: shareInfo.data.share_title,
+            title: shareTitle,
             receiveCode: pc,
             folderId: folderId,
             processedFids: JSON.stringify(files.map((f: any) => f.fileId)),
@@ -212,11 +216,10 @@ class App {
         });
         if (!created) return ctx.reply("⚠️ 已在监控中");
         await ctx.answerCbQuery(`🔔 监控开启`);
-        await ctx.reply(`✅ <b>追更已开启！</b>\n📦 ${shareInfo.data.share_title}`, { parse_mode: 'HTML' });
+        await ctx.reply(`✅ <b>追更已开启！</b>\n📦 ${shareTitle}`, { parse_mode: 'HTML' });
       } catch (err: any) { await ctx.reply(`❌ 失败: ${err.message}`); }
     });
 
-    // 回调：立即转存 (sv)
     this.bot.action(/^sv\|(.+?)\|(.+?)\|(\d+)$/, async (ctx) => {
       const [, sc, pc] = ctx.match;
       const folderId = this.userFolders.get(ctx.from!.id) || "0";
@@ -237,6 +240,7 @@ class App {
   public async start(): Promise<void> {
     try {
       await this.databaseService.initialize();
+      // 使用 alter: true 确保表结构自动同步
       await MonitorTask.sync({ alter: true });
       this.app.listen(process.env.PORT || 8009);
     } catch (error) { process.exit(1); }
