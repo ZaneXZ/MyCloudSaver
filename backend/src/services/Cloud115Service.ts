@@ -1,4 +1,4 @@
-import axios from "axios"; // 直接引入原生 axios，不使用 createAxiosInstance
+import axios from "axios"; // 必须直接导入原生 axios，跳过项目封装的 createAxiosInstance
 import { ShareInfoResponse, FolderListResponse, SaveFileParams } from "../types/cloud";
 import { injectable } from "inversify";
 import { Request } from "express";
@@ -9,22 +9,47 @@ import { logger } from "../utils/logger";
 export class Cloud115Service implements ICloudStorageService {
   public cookie: string = ""; 
 
-  // 定义一个干净的请求头生成器
+  /**
+   * 模仿 CloudSaver 原版成功的请求头配置
+   */
   private getHeaders(referer: string = "https://115.com/") {
     return {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Accept": "application/json, text/javascript, */*; q=0.01",
-      "Accept-Language": "zh-CN,zh;q=0.9",
-      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
       "X-Requested-With": "XMLHttpRequest",
-      "Origin": "https://115.com",
       "Referer": referer,
       "Cookie": this.cookie,
-      "Connection": "keep-alive"
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "Origin": "https://115.com"
     };
   }
 
-  // 获取路径
+  /**
+   * 修复设置路径：使用原生 axios 获取
+   */
+  async resolvePathToId(path: string): Promise<string> {
+    const folders = path.split(/[\/\\]/).filter(p => p.trim() !== "");
+    let currentCid = "0";
+
+    for (const folderName of folders) {
+      // 必须直接使用 axios.get，不使用 this.api
+      const res = await axios.get("https://webapi.115.com/files", {
+        params: { cid: currentCid, show_dir: 1, format: "json" },
+        headers: this.getHeaders()
+      });
+
+      const list = res.data?.data || [];
+      const target = list.find((item: any) => (item.n || item.name) === folderName);
+
+      if (target) {
+        currentCid = target.cid || target.id;
+      } else {
+        throw new Error(`路径不存在: "${folderName}"，请先在 115 网页端创建。`);
+      }
+    }
+    return currentCid;
+  }
+
   async getFolderNameById(cid: string): Promise<string> {
     if (!cid || cid === "0") return "根目录";
     try {
@@ -32,27 +57,48 @@ export class Cloud115Service implements ICloudStorageService {
         headers: this.getHeaders()
       });
       const paths = res.data?.data || [];
-      return Array.isArray(paths) ? paths.map((p: any) => p.name).join(" > ") : `目录(${cid})`;
+      if (Array.isArray(paths) && paths.length > 0) {
+        return paths.map((p: any) => p.name).join(" > ");
+      }
+      return `目录(${cid})`;
     } catch { return `目录(${cid})`; }
   }
 
-  // 路径解析 (GET 模式)
-  async resolvePathToId(path: string): Promise<string> {
-    const folders = path.split(/[\/\\]/).filter(p => p.trim() !== "");
-    let currentCid = "0";
-    for (const folderName of folders) {
-      const res = await axios.get("https://webapi.115.com/files", {
-        params: { cid: currentCid, show_dir: 1, format: "json" },
-        headers: this.getHeaders()
+  /**
+   * 核心转存修复：完全隔离全局拦截器
+   */
+  async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
+    const url = "https://115.com/webapi/share/receive";
+    
+    // 关键点 1：手动构造字符串负载，绝对不传对象
+    const postData = new URLSearchParams();
+    postData.append("cid", params.folderId || "0");
+    postData.append("share_code", params.shareCode);
+    postData.append("receive_code", params.receiveCode || "");
+    postData.append("fid", params.fids?.join(",") || "");
+
+    try {
+      // 关键点 2：直接调用原生 axios，确保没有拦截器干扰
+      const res = await axios({
+        method: "post",
+        url: url,
+        data: postData.toString(),
+        headers: this.getHeaders(`https://115.com/s/${params.shareCode}`)
       });
-      const target = (res.data?.data || []).find((item: any) => (item.n || item.name) === folderName);
-      if (target) currentCid = target.cid || target.id;
-      else throw new Error(`路径不存在: ${folderName}`);
+
+      if (res.data && res.data.state) {
+        return { message: "成功", data: res.data.data };
+      }
+      throw new Error(res.data?.error || res.data?.msg || "115转存拒绝");
+    } catch (error: any) {
+      if (error.response?.status === 405) {
+        throw new Error("405 Method Not Allowed: 请检查后端 axiosInstance 是否定义了冲突的全局 Header");
+      }
+      throw error;
     }
-    return currentCid;
   }
 
-  // 获取分享快照
+  // 其他方法适配原生 axios
   async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const res = await axios.get("https://webapi.115.com/share/snap", {
       params: { share_code: shareCode, receive_code: receiveCode },
@@ -66,41 +112,7 @@ export class Cloud115Service implements ICloudStorageService {
         }
       };
     }
-    throw new Error(res.data?.error || "115快照获取失败");
-  }
-
-  // 转存 (POST 模式) - 彻底重构
-  async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
-    const url = "https://115.com/webapi/share/receive";
-    
-    // 关键：手动拼接字符串，不使用任何对象，确保字节流纯净
-    const postData = [
-      `cid=${params.folderId || "0"}`,
-      `share_code=${params.shareCode}`,
-      `receive_code=${params.receiveCode || ""}`,
-      `fid=${params.fids?.join(",") || ""}`
-    ].join("&");
-
-    logger.info(`[115Service] 正在转存: ${params.shareCode}`);
-
-    try {
-      const res = await axios({
-        method: 'post',
-        url: url,
-        data: postData, // 发送纯字符串
-        headers: this.getHeaders(`https://115.com/s/${params.shareCode}`)
-      });
-
-      if (res.data && res.data.state) {
-        return { message: "成功", data: res.data.data };
-      }
-      throw new Error(res.data?.error || res.data?.msg || "转存失败");
-    } catch (error: any) {
-      if (error.response?.status === 405) {
-        throw new Error("405错误：请求被115拒绝。请检查Docker容器是否挂了代理，或尝试更换User-Agent。");
-      }
-      throw error;
-    }
+    throw new Error(res.data?.error || "快照解析失败");
   }
 
   async setCookie(req: Request): Promise<void> {}
