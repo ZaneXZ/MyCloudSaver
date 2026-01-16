@@ -135,7 +135,6 @@ class App {
       ctx.reply("📋 <b>追更任务列表：</b>", { parse_mode: 'HTML', ...Markup.inlineKeyboard(kb) });
     });
 
-    // --- 核心文本处理逻辑 ---
     this.bot.on("text", async (ctx) => {
       const userId = ctx.from.id;
       if (userId.toString() !== adminUserId.toString()) return;
@@ -143,39 +142,41 @@ class App {
       const text = ctx.message.text.trim();
       const state = userState.get(userId);
 
-      // 1. 如果输入的是指令，跳过
       if (text.startsWith('/')) return;
 
-      // 2. 如果是设置文件夹状态
+      // 1. 设置文件夹路径逻辑
       if (state === "SETTING_FOLDER") {
-        const loading = await ctx.reply("⏳ 正在配置路径...");
+        const loading = await ctx.reply("⏳ 正在配置 115 路径...");
         try {
           const config = await this.getUserConfig(adminUserId);
           this.cloud115Service.cookie = config.cookie;
           const targetCid = await this.cloud115Service.resolvePathToId(text);
+          
           await UserSetting.upsert({
-            userId: adminUserId, folderId: targetCid,
-            cloud115Cookie: config.cookie, quarkCookie: config.quarkCookie
+            userId: adminUserId, 
+            folderId: targetCid,
+            cloud115Cookie: config.cookie, 
+            quarkCookie: config.quarkCookie
           });
+          
           userState.delete(userId);
           const finalPath = await this.cloud115Service.getFolderNameById(targetCid);
           await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined, 
-            `✅ <b>路径已设置</b>\n📍 ${finalPath}`, { parse_mode: 'HTML' });
-        } catch (err: any) { ctx.reply(`❌ 失败: ${err.message}`); }
+            `✅ <b>路径已成功设置</b>\n📍 完整路径：<code>${finalPath}</code>`, { parse_mode: 'HTML' });
+        } catch (err: any) { ctx.reply(`❌ 设置失败: ${err.message}`); }
         return;
       }
 
-      // 3. 处理搜索逻辑 (参考之前版本：只要是 SEARCHING 状态，或没有状态但发送了文本)
+      // 2. 搜索逻辑
       if (state === "SEARCHING" || !state) {
-        // 如果输入是数字，且缓存中有数据，执行转存
+        // 数字转存判断
         if (/^[1-8]$/.test(text) && searchCache.has(userId)) {
           const cache = searchCache.get(userId);
           const selected = cache?.[parseInt(text) - 1];
           if (selected) return this.handleTransfer(ctx, selected.sc, selected.pc, adminUserId);
         }
 
-        // 否则执行搜索
-        userState.set(userId, "SEARCHING"); // 确保进入搜索模式
+        userState.set(userId, "SEARCHING");
         const loading = await ctx.reply(`🔍 正在检索 "${text}"...`);
         try {
           const config = await this.getUserConfig(adminUserId);
@@ -189,21 +190,45 @@ class App {
 
           let resTxt = `🔍 <b>"${text}"</b> 搜索结果:\n\n`;
           const currentCache: any[] = [];
-          for (const item of allItems.slice(0, 8)) {
-            const shareLink = [item.link, ...(item.cloudLinks || [])].find(l => typeof l === 'string' && l.includes('115.com/s/'));
+          
+          for (const item of allItems) {
+            // 聚合所有可能的链接字段进行匹配
+            const potentialLinks = [
+              item.link,
+              item.content,
+              ...(Array.isArray(item.cloudLinks) ? item.cloudLinks : [])
+            ].filter(l => typeof l === 'string');
+
+            // 增强正则：支持 115.com, 115cdn.com, anxia.com
+            const shareLink = potentialLinks.find(l => /115\.com\/s\/|115cdn\.com\/s\/|anxia\.com\/s\//i.test(l));
+
             if (shareLink) {
-              const sc = shareLink.match(/\/s\/([a-zA-Z0-9]+)/)?.[1];
-              const pc = shareLink.match(/password=([a-zA-Z0-9]+)/)?.[1] || item.password || "";
+              const scMatch = shareLink.match(/\/s\/([a-zA-Z0-9]+)/);
+              const sc = scMatch ? scMatch[1] : null;
+
               if (sc) {
+                // 提取密码逻辑：优先从 URL 参数取，其次从 item 属性取
+                const pcMatch = shareLink.match(/password=([a-zA-Z0-9]+)/i);
+                const pc = pcMatch ? pcMatch[1] : (item.password || "");
+
                 currentCache.push({ sc, pc });
                 resTxt += `${currentCache.length}. 🎬 <b>${item.title}</b>\n📏 ${formatBytes(item.size)}\n\n`;
               }
             }
+            if (currentCache.length >= 8) break;
           }
+
+          if (currentCache.length === 0) {
+            return ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined, "❌ 找到资源但无有效 115 分享链接");
+          }
+
           searchCache.set(userId, currentCache);
           await ctx.telegram.editMessageText(ctx.chat.id, loading.message_id, undefined, 
-            resTxt + `💡 回复数字 [1-${currentCache.length}] 转存`, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } });
-        } catch (err) { ctx.reply("❌ 搜索服务异常"); }
+            resTxt + `💡 回复数字 [1-${currentCache.length}] 转存`, { 
+              parse_mode: 'HTML', 
+              link_preview_options: { is_disabled: true } 
+            });
+        } catch (err) { ctx.reply("❌ 搜索服务暂时不可用"); }
       }
     });
 
@@ -223,7 +248,7 @@ class App {
           folderId, processedFids: JSON.stringify(info.data.list.map((f:any)=>f.fileId)), chatId: ctx.chat!.id
         });
         ctx.reply(`✅ 追更已开启: ${info.data.share_title}`);
-      } catch (err) { ctx.reply("❌ 失败"); }
+      } catch (err) { ctx.reply("❌ 开启追更失败"); }
     });
 
     this.bot.action("cancel_action", (ctx) => ctx.deleteMessage());
@@ -233,10 +258,15 @@ class App {
   private async handleTransfer(ctx: any, sc: string, pc: string, adminUserId: string) {
     const { cookie, folderId } = await this.getUserConfig(adminUserId);
     try {
-      ctx.reply("⏳ 正在转存...");
+      ctx.reply("⏳ 正在转存到 115...");
       this.cloud115Service.cookie = cookie;
       const info = await this.cloud115Service.getShareInfo(sc, pc);
-      await this.cloud115Service.saveSharedFile({ shareCode: sc, receiveCode: pc, fids: info.data.list.map((f:any)=>f.fileId), folderId });
+      await this.cloud115Service.saveSharedFile({ 
+        shareCode: sc, 
+        receiveCode: pc, 
+        fids: info.data.list.map((f:any)=>f.fileId), 
+        folderId 
+      });
       ctx.reply(`✅ 转存成功: ${info.data.share_title}`, Markup.inlineKeyboard([
         [Markup.button.callback("🔔 开启追更", `mt|${sc}|${pc}|0`)],[Markup.button.callback("不需要", "cancel_action")]
       ]));
