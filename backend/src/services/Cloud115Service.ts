@@ -67,16 +67,30 @@ export class Cloud115Service implements ICloudStorageService {
    * 修改后的 getShareInfo
    * 增加了对 share_title 的提取
    */
-  async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
+async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const response = await this.api.get("/share/snap", {
-      params: {
-        share_code: shareCode,
-        receive_code: receiveCode,
-        offset: 0,
-        limit: 20,
-        cid: "",
-      },
+      params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 20, cid: "" },
     });
+
+    const resData = response.data;
+    if (resData?.state && resData.data) {
+      // 核心修复：115 标题可能在 data.share_title 或 data.title
+      const title = resData.data.share_title || resData.data.title || "未命名资源";
+      
+      return {
+        data: {
+          share_title: title,
+          list: (resData.data.list || []).map((item: any) => ({
+            fileId: item.cid || item.fid,
+            fileName: item.n || item.fn,
+            fileSize: item.s || item.fz,
+          })),
+        },
+      };
+    } else {
+      throw new Error(resData?.error || "获取分享信息失败");
+    }
+  }
 
     const resData = response.data;
     
