@@ -5,7 +5,7 @@ import { injectable } from "inversify";
 import { Request } from "express";
 import { ICloudStorageService } from "@/types/services";
 import { logger } from "../utils/logger";
-import qs from "qs"; // 如果没安装，请运行 npm install qs
+import qs from "qs";
 
 @injectable()
 export class Cloud115Service implements ICloudStorageService {
@@ -13,15 +13,12 @@ export class Cloud115Service implements ICloudStorageService {
   public cookie: string = ""; 
 
   constructor() {
-    // 1. 初始化实例，移除 Host，增强 UA
     this.api = createAxiosInstance(
       "https://webapi.115.com",
       AxiosHeaders.from({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "zh-CN,zh;q=0.9",
         "Referer": "https://115.com/",
-        "Origin": "https://115.com",
         "X-Requested-With": "XMLHttpRequest"
       })
     );
@@ -32,7 +29,7 @@ export class Cloud115Service implements ICloudStorageService {
     });
   }
 
-  // 获取完整路径名
+  // 获取完整路径文字
   async getFolderNameById(cid: string): Promise<string> {
     if (!cid || cid === "0") return "根目录";
     try {
@@ -41,13 +38,13 @@ export class Cloud115Service implements ICloudStorageService {
       if (Array.isArray(paths) && paths.length > 0) {
         return paths.map((p: any) => p.name).filter(Boolean).join(" > ");
       }
-      return response.data?.name || `目录(${cid})`;
+      return `目录(${cid})`;
     } catch (error) {
       return `目录(${cid})`;
     }
   }
 
-  // 解析并创建文件夹 (修复 405)
+  // 仅检索已有路径，不创建
   async resolvePathToId(path: string): Promise<string> {
     const folders = path.split(/[\/\\]/).filter(p => p.trim() !== "");
     let currentCid = "0";
@@ -63,34 +60,22 @@ export class Cloud115Service implements ICloudStorageService {
       if (target) {
         currentCid = target.cid || target.id;
       } else {
-        // 关键修复：显式使用 qs 或 URLSearchParams 序列化，并手动指定 Header
-        const postData = qs.stringify({ pid: currentCid, name: folderName });
-        
-        const createRes = await this.api.post("/files/add", postData, {
-          headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" }
-        });
-        
-        if (createRes.data && createRes.data.state) {
-          currentCid = createRes.data.cid;
-        } else {
-          throw new Error(`创建文件夹失败: ${createRes.data?.error || '接口拦截'}`);
-        }
+        throw new Error(`路径不存在: "${folderName}"，请先在 115 网页端创建。`);
       }
     }
     return currentCid;
   }
 
-  // 获取分享快照
   async getShareInfo(shareCode: string, receiveCode = ""): Promise<ShareInfoResponse> {
     const response = await this.api.get("/share/snap", {
       params: { share_code: shareCode, receive_code: receiveCode, offset: 0, limit: 100 },
     });
     const resData = response.data;
-    if (resData?.state && resData.data) {
+    if (resData?.state) {
       return {
         data: {
-          share_title: resData.data.share_title || resData.data.title || "未知资源",
-          list: (resData.data.list || []).map((item: any) => ({
+          share_title: resData.data?.share_title || "未知资源",
+          list: (resData.data?.list || []).map((item: any) => ({
             fileId: item.fid || item.cid,
             fileName: item.n || item.fn,
             fileSize: Number(item.s || item.fz || 0),
@@ -98,10 +83,10 @@ export class Cloud115Service implements ICloudStorageService {
         },
       };
     }
-    throw new Error(resData?.error || "115授权失效");
+    throw new Error(resData?.error || "115链接提取失败");
   }
 
-  // 转存文件 (修复 405)
+  // 转存依然需要 POST，但使用了更稳妥的 qs 序列化
   async saveSharedFile(params: SaveFileParams): Promise<{ message: string; data: unknown }> {
     const postData = qs.stringify({
       cid: params.folderId || "0",
@@ -110,7 +95,6 @@ export class Cloud115Service implements ICloudStorageService {
       fid: params.fids?.join(",") || "",
     });
 
-    // 尝试直接访问主站 API 路径，增加稳定性
     const response = await this.api.post("https://115.com/webapi/share/receive", postData, {
       headers: { 
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
