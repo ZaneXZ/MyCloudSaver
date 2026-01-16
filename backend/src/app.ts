@@ -150,20 +150,31 @@ class App {
     });
 
     // --- 修改后的搜索逻辑：支持多行独立按钮 ---
+   // --- 增强版搜索逻辑：显示来源频道 + 多行独立按钮 ---
     this.bot.command("search", async (ctx) => {
       const keyword = ctx.payload;
       if (!keyword) return ctx.reply("💡 请输入关键词");
-      const loadingMsg = await ctx.reply(`🔍 搜索 "${keyword}"...`);
+      const loadingMsg = await ctx.reply(`🔍 正在搜索 "${keyword}"...`);
+      
       const { cookie, folderId } = await this.getUserConfig(adminUserId);
       const folderName = cookie ? await this.getFolderName(folderId, cookie) : "根目录";
 
       try {
         const result = await this.searcher.searchAll(keyword);
-        const allItems = (result.data || []).flatMap((c: any) => c.list || []);
-        const topItems = allItems.slice(0, 8); // 取前 8 条，避免按钮过多超过 Telegram 限制
         
+        // 修改点：在扁平化列表时，尝试把频道名称注入到每一个 item 中
+        const allItems = (result.data || []).flatMap((sourceGroup: any) => {
+          const sourceName = sourceGroup.title || sourceGroup.source || "未知频道";
+          return (sourceGroup.list || []).map((item: any) => ({
+            ...item,
+            sourceName // 将频道名称注入到 item 对象中
+          }));
+        });
+
+        const topItems = allItems.slice(0, 8); 
+
         if (topItems.length === 0) {
-          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到。");
+          return ctx.telegram.editMessageText(ctx.chat.id, loadingMsg.message_id, undefined, "❌ 未找到相关资源。");
         }
 
         let responseTxt = `🔍 <b>"${keyword}"</b> 结果:\n\n`;
@@ -171,20 +182,30 @@ class App {
 
         topItems.forEach((item: any, index: number) => {
           const num = index + 1;
-          const shareLink115 = item.cloudLinks?.find((l: string) => /115\.com\/s\//.test(l));
+          const shareLink115 = (item.cloudLinks || []).find((l: string) => 
+            /115\.com\/s\//i.test(l) || /anxia\.com\/s\//i.test(l)
+          );
           
-          responseTxt += `${num}. <b>${item.title}</b>\n\n`;
+          // 在标题下方添加【来源频道】
+          responseTxt += `${num}. <b>${item.title}</b>\n`;
+          responseTxt += `📺 来源：<code>${item.sourceName}</code>\n\n`;
 
           if (shareLink115) {
-            const url = new URL(shareLink115);
-            const sc = url.pathname.split('/').filter(p => p && p !== 's').pop() || "";
-            const pc = url.searchParams.get("password") || "";
-            
-            // 为每一行结果添加独立的一行按钮
-            keyboard.push([
-              Markup.button.callback(`📥 转存 #${num}`, `sv|${sc}|${pc}|${index}`),
-              Markup.button.callback(`🔔 追更 #${num}`, `mt|${sc}|${pc}|${index}`)
-            ]);
+            try {
+              const url = new URL(shareLink115.trim());
+              const paths = url.pathname.split('/').filter(p => p && p !== 's');
+              const sc = paths[paths.length - 1] || "";
+              const pc = url.searchParams.get("password") || "";
+              
+              if (sc) {
+                keyboard.push([
+                  Markup.button.callback(`📥 转存 #${num}`, `sv|${sc}|${pc}|${index}`),
+                  Markup.button.callback(`🔔 追更 #${num}`, `mt|${sc}|${pc}|${index}`)
+                ]);
+              }
+            } catch (e) {
+              logger.error(`解析链接失败: ${shareLink115}`);
+            }
           }
         });
 
@@ -195,6 +216,7 @@ class App {
           ...Markup.inlineKeyboard(keyboard) 
         });
       } catch (err) {
+        logger.error("搜索失败:", err);
         ctx.reply("❌ 搜索失败");
       }
     });
