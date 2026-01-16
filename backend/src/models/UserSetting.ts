@@ -52,6 +52,11 @@ UserSetting.init(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    folderId: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      defaultValue: "0"
+    }    
   },
   {
     sequelize,
